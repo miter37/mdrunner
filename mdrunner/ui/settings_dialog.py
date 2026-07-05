@@ -6,6 +6,7 @@ import shlex
 from typing import Optional
 
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
@@ -73,10 +74,11 @@ class SettingsDialog(QDialog):
         left_w.setLayout(left)
         self.agent_list = QListWidget(left_w)
         self.agent_list.currentItemChanged.connect(self._on_agent_selected)
-        for agent_id in sorted(self.settings.agents.keys()):
+        self.agent_list.setDragEnabled(True)
+        self.agent_list.setAcceptDrops(True)
+        self.agent_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        for agent_id in self.settings.agents.keys():
             self.agent_list.addItem(QListWidgetItem(agent_id))
-        if self.agent_list.count() > 0:
-            self.agent_list.setCurrentRow(0)
         left.addWidget(self.agent_list, 1)
 
         btn_row = QHBoxLayout()
@@ -86,6 +88,14 @@ class SettingsDialog(QDialog):
         self.btn_remove_agent = QPushButton("Remove", left_w)
         self.btn_remove_agent.clicked.connect(self._on_remove_agent)
         btn_row.addWidget(self.btn_remove_agent)
+
+        self.btn_up_agent = QPushButton("▲", left_w)
+        self.btn_up_agent.clicked.connect(self._on_move_agent_up)
+        btn_row.addWidget(self.btn_up_agent)
+        self.btn_down_agent = QPushButton("▼", left_w)
+        self.btn_down_agent.clicked.connect(self._on_move_agent_down)
+        btn_row.addWidget(self.btn_down_agent)
+
         self.btn_health = QPushButton("Run Health Check", left_w)
         self.btn_health.clicked.connect(self._on_health_button)
         btn_row.addWidget(self.btn_health)
@@ -160,6 +170,9 @@ class SettingsDialog(QDialog):
         self.health_result.setPlaceholderText("(health check result will appear here)")
         right.addWidget(self.health_result)
 
+        if self.agent_list.count() > 0:
+            self.agent_list.setCurrentRow(0)
+
         layout.addWidget(right_w, 2)
         return w
 
@@ -180,9 +193,18 @@ class SettingsDialog(QDialog):
 
         from .workers import ModelFetchWorker
 
-        self._model_worker = ModelFetchWorker(aid, cfg.binary)
+        if not hasattr(self, "_active_model_workers"):
+            self._active_model_workers = []
+
+        worker = ModelFetchWorker(aid, cfg.binary)
+        self._model_worker = worker
+        self._active_model_workers.append(worker)
 
         def on_models_loaded(models):
+            if worker in self._active_model_workers:
+                self._active_model_workers.remove(worker)
+            if self._model_worker is not worker:
+                return
             self.in_default_model.clear()
             if models:
                 self.in_default_model.addItems(models)
@@ -193,14 +215,18 @@ class SettingsDialog(QDialog):
             self.in_default_model.setEnabled(True)
 
         def on_models_error(err):
+            if worker in self._active_model_workers:
+                self._active_model_workers.remove(worker)
+            if self._model_worker is not worker:
+                return
             self.in_default_model.clear()
             if cfg.default_model:
                 self.in_default_model.setCurrentText(cfg.default_model)
             self.in_default_model.setEnabled(True)
 
-        self._model_worker.models_ready.connect(on_models_loaded)
-        self._model_worker.error.connect(on_models_error)
-        self._model_worker.start()
+        worker.models_ready.connect(on_models_loaded)
+        worker.error.connect(on_models_error)
+        worker.start()
 
         self.in_health_cmd.setText(" ".join(cfg.health_cmd))
         self.in_bypass_sched.setText(" ".join(cfg.bypass.scheduled))
@@ -257,6 +283,26 @@ class SettingsDialog(QDialog):
             return
         del self.settings.agents[aid]
         self.agent_list.takeItem(self.agent_list.currentRow())
+
+    def _on_move_agent_up(self) -> None:
+        row = self.agent_list.currentRow()
+        if row <= 0:
+            return
+        self.agent_list.blockSignals(True)
+        item = self.agent_list.takeItem(row)
+        self.agent_list.insertItem(row - 1, item)
+        self.agent_list.setCurrentRow(row - 1)
+        self.agent_list.blockSignals(False)
+
+    def _on_move_agent_down(self) -> None:
+        row = self.agent_list.currentRow()
+        if row < 0 or row >= self.agent_list.count() - 1:
+            return
+        self.agent_list.blockSignals(True)
+        item = self.agent_list.takeItem(row)
+        self.agent_list.insertItem(row + 1, item)
+        self.agent_list.setCurrentRow(row + 1)
+        self.agent_list.blockSignals(False)
 
     def _on_detect_binary(self) -> None:
         import shutil
@@ -414,6 +460,14 @@ class SettingsDialog(QDialog):
                 scheduled=shlex.split(self.in_bypass_sched.text()),
                 manual=shlex.split(self.in_bypass_manual.text()),
             )
+
+        # Reorder self.settings.agents to match the visual order in self.agent_list
+        new_agents = {}
+        for i in range(self.agent_list.count()):
+            aid = self.agent_list.item(i).text()
+            if aid in self.settings.agents:
+                new_agents[aid] = self.settings.agents[aid]
+        self.settings.agents = new_agents
         # Defaults
         markers = [
             line.strip()

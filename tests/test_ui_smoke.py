@@ -194,3 +194,66 @@ def test_settings_dialog_defaults_integration(app_and_window) -> None:
     assert settings.defaults.artifact_time_window_seconds == 300
 
     dlg.deleteLater()
+
+
+@pytest.mark.gui
+def test_settings_dialog_agent_reordering(app_and_window) -> None:
+    _app, win = app_and_window
+    from mdrunner.ui.settings_dialog import SettingsDialog
+    from mdrunner.config import Settings, AgentConfig
+    from PySide6.QtWidgets import QAbstractItemView
+
+    # Set up agents in a specific, non-alphabetical order
+    agents = {
+        "charlie": AgentConfig(binary="charlie"),
+        "alpha": AgentConfig(binary="alpha"),
+        "bravo": AgentConfig(binary="bravo"),
+    }
+    settings = Settings(agents=agents)
+
+    dlg = SettingsDialog(parent=win, settings=settings)
+
+    # 1. Check loading order preservation
+    items = [dlg.agent_list.item(i).text() for i in range(dlg.agent_list.count())]
+    assert items == ["charlie", "alpha", "bravo"]
+
+    # 2. Check drag-and-drop properties
+    assert dlg.agent_list.dragEnabled() is True
+    assert dlg.agent_list.acceptDrops() is True
+    assert dlg.agent_list.dragDropMode() == QAbstractItemView.DragDropMode.InternalMove
+
+    # 3. Check Up/Down buttons and move handlers
+    assert hasattr(dlg, "btn_up_agent")
+    assert hasattr(dlg, "btn_down_agent")
+
+    # Select "alpha" (index 1) and move it up -> should become ["alpha", "charlie", "bravo"]
+    dlg.agent_list.setCurrentRow(1)
+    dlg._on_move_agent_up()
+    items = [dlg.agent_list.item(i).text() for i in range(dlg.agent_list.count())]
+    assert items == ["alpha", "charlie", "bravo"]
+
+    # Select "bravo" (index 2) and move it down -> no effect
+    dlg.agent_list.setCurrentRow(2)
+    dlg._on_move_agent_down()
+    items = [dlg.agent_list.item(i).text() for i in range(dlg.agent_list.count())]
+    assert items == ["alpha", "charlie", "bravo"]
+
+    # Select "alpha" (index 0) and move it down -> should become ["charlie", "alpha", "bravo"]
+    dlg.agent_list.setCurrentRow(0)
+    dlg._on_move_agent_down()
+    items = [dlg.agent_list.item(i).text() for i in range(dlg.agent_list.count())]
+    assert items == ["charlie", "alpha", "bravo"]
+
+    # 4. Check saving the new order upon accept
+    # Let's move "bravo" (index 2) up -> ["charlie", "bravo", "alpha"]
+    dlg.agent_list.setCurrentRow(2)
+    dlg._on_move_agent_up()
+
+    dlg._on_accept()
+
+    # The settings.agents keys should be in the new order: charlie, bravo, alpha
+    new_keys = list(settings.agents.keys())
+    assert new_keys == ["charlie", "bravo", "alpha"]
+
+    dlg.deleteLater()
+
