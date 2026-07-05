@@ -294,6 +294,7 @@ def test_settings_dialog_deepcopy_and_persistence(app_and_window) -> None:
 
     # Modify the UI inputs
     dlg.in_binary.setText("alpha-modified")
+    dlg.in_default_model.setEnabled(True)
     dlg.in_default_model.setCurrentText("model-a-modified")
     dlg.in_health_cmd.setText("alpha-modified --health")
     dlg.in_bypass_sched.setText("--sched-a-modified")

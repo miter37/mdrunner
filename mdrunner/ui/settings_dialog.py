@@ -184,7 +184,10 @@ class SettingsDialog(QDialog):
             prev_cfg = self.settings.agents.get(prev_aid)
             if prev_cfg is not None:
                 prev_cfg.binary = self.in_binary.text().strip() or prev_cfg.binary
-                prev_cfg.default_model = self.in_default_model.currentText().strip() or None
+                # Only update default_model if the combo box is enabled and the text isn't the loading placeholder
+                model_text = self.in_default_model.currentText().strip()
+                if self.in_default_model.isEnabled() and model_text != "(loading models...)":
+                    prev_cfg.default_model = model_text or None
                 prev_cfg.health_cmd = (
                     shlex.split(self.in_health_cmd.text())
                     if self.in_health_cmd.text().strip()
@@ -468,7 +471,10 @@ class SettingsDialog(QDialog):
         cfg = self._current_agent_cfg()
         if cfg is not None:
             cfg.binary = self.in_binary.text().strip() or cfg.binary
-            cfg.default_model = self.in_default_model.currentText().strip() or None
+            # Only update default_model if the combo box is enabled and the text isn't the loading placeholder
+            model_text = self.in_default_model.currentText().strip()
+            if self.in_default_model.isEnabled() and model_text != "(loading models...)":
+                cfg.default_model = model_text or None
             cfg.health_cmd = (
                 shlex.split(self.in_health_cmd.text())
                 if self.in_health_cmd.text().strip()
