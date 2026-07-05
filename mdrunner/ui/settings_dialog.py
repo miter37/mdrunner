@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import shlex
 from typing import Optional
+
 
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -42,7 +44,7 @@ from ..config import (
 class SettingsDialog(QDialog):
     def __init__(self, *, parent, settings: Settings) -> None:
         super().__init__(parent)
-        self.settings = settings
+        self.settings = copy.deepcopy(settings)
         self.setWindowTitle("mdrunner — Settings")
         self.resize(820, 600)
 
@@ -177,6 +179,22 @@ class SettingsDialog(QDialog):
         return w
 
     def _on_agent_selected(self, _current, _previous) -> None:
+        if _previous is not None:
+            prev_aid = _previous.text()
+            prev_cfg = self.settings.agents.get(prev_aid)
+            if prev_cfg is not None:
+                prev_cfg.binary = self.in_binary.text().strip() or prev_cfg.binary
+                prev_cfg.default_model = self.in_default_model.currentText().strip() or None
+                prev_cfg.health_cmd = (
+                    shlex.split(self.in_health_cmd.text())
+                    if self.in_health_cmd.text().strip()
+                    else [prev_cfg.binary, "--version"]
+                )
+                prev_cfg.bypass = Bypass(
+                    scheduled=shlex.split(self.in_bypass_sched.text()),
+                    manual=shlex.split(self.in_bypass_manual.text()),
+                )
+
         cfg = self._current_agent_cfg()
         if cfg is None:
             return

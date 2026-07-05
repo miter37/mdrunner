@@ -188,6 +188,7 @@ def test_settings_dialog_defaults_integration(app_and_window) -> None:
 
     # Accept changes (simulate OK click)
     dlg._on_accept()
+    settings = dlg.settings
 
     assert settings.defaults.timeout_minutes == 20
     assert settings.defaults.artifact_markers == ["NewMarker1", "NewMarker2"]
@@ -250,6 +251,7 @@ def test_settings_dialog_agent_reordering(app_and_window) -> None:
     dlg._on_move_agent_up()
 
     dlg._on_accept()
+    settings = dlg.settings
 
     # The settings.agents keys should be in the new order: charlie, bravo, alpha
     new_keys = list(settings.agents.keys())
@@ -257,3 +259,63 @@ def test_settings_dialog_agent_reordering(app_and_window) -> None:
 
     dlg.deleteLater()
 
+
+@pytest.mark.gui
+def test_settings_dialog_deepcopy_and_persistence(app_and_window) -> None:
+    _app, win = app_and_window
+    from mdrunner.ui.settings_dialog import SettingsDialog
+    from mdrunner.config import Settings, AgentConfig, Bypass
+
+    agents = {
+        "alpha": AgentConfig(
+            binary="alpha",
+            default_model="model-a",
+            health_cmd=["alpha", "--version"],
+            bypass=Bypass(scheduled=["--sched-a"], manual=["--man-a"]),
+        ),
+        "bravo": AgentConfig(
+            binary="bravo",
+            default_model="model-b",
+            health_cmd=["bravo", "--version"],
+            bypass=Bypass(scheduled=["--sched-b"], manual=["--man-b"]),
+        ),
+    }
+    settings = Settings(agents=agents)
+
+    dlg = SettingsDialog(parent=win, settings=settings)
+
+    # 1. Verify deepcopy is applied
+    assert dlg.settings is not settings
+    assert dlg.settings.agents["alpha"] is not settings.agents["alpha"]
+
+    # 2. Verify settings are persisted on agent switch
+    # Select alpha (index 0)
+    assert dlg.agent_list.currentRow() == 0
+
+    # Modify the UI inputs
+    dlg.in_binary.setText("alpha-modified")
+    dlg.in_default_model.setCurrentText("model-a-modified")
+    dlg.in_health_cmd.setText("alpha-modified --health")
+    dlg.in_bypass_sched.setText("--sched-a-modified")
+    dlg.in_bypass_manual.setText("--man-a-modified")
+
+    # Change current row to 1 ("bravo")
+    dlg.agent_list.setCurrentRow(1)
+
+    # Verify that the modifications to "alpha" are saved in dlg.settings.agents["alpha"]
+    alpha_cfg = dlg.settings.agents["alpha"]
+    assert alpha_cfg.binary == "alpha-modified"
+    assert alpha_cfg.default_model == "model-a-modified"
+    assert alpha_cfg.health_cmd == ["alpha-modified", "--health"]
+    assert alpha_cfg.bypass.scheduled == ["--sched-a-modified"]
+    assert alpha_cfg.bypass.manual == ["--man-a-modified"]
+
+    # Verify that the original settings passed in are completely untouched (thanks to deepcopy)
+    orig_alpha_cfg = settings.agents["alpha"]
+    assert orig_alpha_cfg.binary == "alpha"
+    assert orig_alpha_cfg.default_model == "model-a"
+    assert orig_alpha_cfg.health_cmd == ["alpha", "--version"]
+    assert orig_alpha_cfg.bypass.scheduled == ["--sched-a"]
+    assert orig_alpha_cfg.bypass.manual == ["--man-a"]
+
+    dlg.deleteLater()
