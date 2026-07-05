@@ -91,7 +91,10 @@ def test_task_dialog_preview(app_and_window) -> None:
 
     dlg = TaskDialog(parent=win, settings=win.settings, task=None)
     # No prompt file yet → preview is empty
-    assert "(set prompt file to see preview)" in dlg.preview_text.toPlainText() or "preview" in dlg.preview_text.toPlainText().lower()
+    assert (
+        "(set prompt file to see preview)" in dlg.preview_text.toPlainText()
+        or "preview" in dlg.preview_text.toPlainText().lower()
+    )
     dlg.deleteLater()
 
 
@@ -100,10 +103,10 @@ def test_task_dialog_notifications_integration(app_and_window) -> None:
     _app, win = app_and_window
     from mdrunner.ui.task_dialog import TaskDialog
     from mdrunner.config import Task, OnFailure, Schedule
-    from pathlib import Path
 
     # We need a dummy prompt file to avoid acceptance validation warning
     from mdrunner.utils.paths import settings_file
+
     prompt_file = settings_file().parent / "dummy.md"
     prompt_file.write_text("# Dummy prompt", encoding="utf-8")
 
@@ -116,7 +119,7 @@ def test_task_dialog_notifications_integration(app_and_window) -> None:
         on_failure=OnFailure(notify=True),
         notify_artifact=True,
         artifact_dir="/tmp/artifacts",
-        artifact_extensions=[".png", ".pdf"]
+        artifact_extensions=[".png", ".pdf"],
     )
 
     dlg = TaskDialog(parent=win, settings=win.settings, task=task)
@@ -145,6 +148,7 @@ def test_task_dialog_notifications_integration(app_and_window) -> None:
     # Retrieve the saved task
     from mdrunner.config import load_tasks
     from mdrunner.utils.paths import tasks_file
+
     saved_tasks = load_tasks(tasks_file())
     saved_task = next(t for t in saved_tasks if t.id == "notify_test")
 
@@ -166,7 +170,7 @@ def test_settings_dialog_defaults_integration(app_and_window) -> None:
         defaults=Defaults(
             timeout_minutes=15,
             artifact_markers=["TestMarker1", "TestMarker2"],
-            artifact_time_window_seconds=120
+            artifact_time_window_seconds=120,
         )
     )
 

@@ -111,6 +111,7 @@ class SettingsDialog(QDialog):
         row_l.addWidget(btn_detect)
         f1.addRow("Binary", row)
         from PySide6.QtWidgets import QComboBox
+
         self.in_default_model = QComboBox(gb1)
         self.in_default_model.setEditable(True)
         f1.addRow("Default model", self.in_default_model)
@@ -132,7 +133,9 @@ class SettingsDialog(QDialog):
         v3 = QVBoxLayout(gb3)
         self.preset_table = QTableWidget(0, 2, gb3)
         self.preset_table.setHorizontalHeaderLabels(["Name", "Args"])
-        self.preset_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.preset_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )
         self.preset_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.preset_table.verticalHeader().setVisible(False)
         v3.addWidget(self.preset_table)
@@ -166,18 +169,19 @@ class SettingsDialog(QDialog):
             return
         aid = self._current_agent_id()
         self.in_binary.setText(cfg.binary)
-        
+
         self.in_default_model.clear()
         if cfg.default_model:
             self.in_default_model.setCurrentText(cfg.default_model)
-        
+
         self.in_default_model.setEnabled(False)
         self.in_default_model.addItem("(loading models...)")
         self.in_default_model.setCurrentIndex(0)
-        
+
         from .workers import ModelFetchWorker
+
         self._model_worker = ModelFetchWorker(aid, cfg.binary)
-        
+
         def on_models_loaded(models):
             self.in_default_model.clear()
             if models:
@@ -193,7 +197,7 @@ class SettingsDialog(QDialog):
             if cfg.default_model:
                 self.in_default_model.setCurrentText(cfg.default_model)
             self.in_default_model.setEnabled(True)
-            
+
         self._model_worker.models_ready.connect(on_models_loaded)
         self._model_worker.error.connect(on_models_error)
         self._model_worker.start()
@@ -223,7 +227,9 @@ class SettingsDialog(QDialog):
             self.preset_table.setItem(row, 1, QTableWidgetItem(" ".join(p.args)))
 
     def _on_add_agent(self) -> None:
-        name, ok = QInputDialog.getText(self, "Add agent", "Agent id (e.g. opencode, codex, openclaw):")
+        name, ok = QInputDialog.getText(
+            self, "Add agent", "Agent id (e.g. opencode, codex, openclaw):"
+        )
         if not ok or not name.strip():
             return
         name = name.strip()
@@ -243,7 +249,9 @@ class SettingsDialog(QDialog):
         if aid is None:
             return
         ans = QMessageBox.question(
-            self, "Remove agent", f"Remove agent config for {aid!r}? Tasks using it will fail until you re-add the entry."
+            self,
+            "Remove agent",
+            f"Remove agent config for {aid!r}? Tasks using it will fail until you re-add the entry.",
         )
         if ans != QMessageBox.StandardButton.Yes:
             return
@@ -266,16 +274,17 @@ class SettingsDialog(QDialog):
             return
         binary = self.in_binary.text().strip()
         model = self.in_default_model.currentText().strip() or None
-        
+
         self.health_result.clear()
         self.btn_health.setEnabled(False)
-        
+
         from .workers import SingleAgentHealthWorker
+
         self._health_worker = SingleAgentHealthWorker(aid, binary, model)
-        
+
         def on_progress(msg):
             self.health_result.appendPlainText(msg)
-            
+
         def on_finished(result):
             self.btn_health.setEnabled(True)
             text = []
@@ -288,18 +297,17 @@ class SettingsDialog(QDialog):
                 text.append("✗ 헬스체크 최종 판정: 실패 (FAIL)")
                 if result.error:
                     text.append(f"  오류 내용: {result.error}")
-            
+
             if result.stdout:
                 text.append(f"\n--- [Stdout Output] ---\n{result.stdout[:500]}")
             if result.stderr:
                 text.append(f"\n--- [Stderr Output] ---\n{result.stderr[:500]}")
-                
+
             self.health_result.appendPlainText("\n".join(text))
-            
+
         self._health_worker.progress.connect(on_progress)
         self._health_worker.finished.connect(on_finished)
         self._health_worker.start()
-
 
     def _on_add_preset(self) -> None:
         cfg = self._current_agent_cfg()
@@ -325,9 +333,7 @@ class SettingsDialog(QDialog):
         name, ok = QInputDialog.getText(self, "Edit preset", "Name:", text=old.name)
         if not ok or not name.strip():
             return
-        args, ok2 = QInputDialog.getText(
-            self, "Edit preset", "Args:", text=" ".join(old.args)
-        )
+        args, ok2 = QInputDialog.getText(self, "Edit preset", "Args:", text=" ".join(old.args))
         if not ok2:
             return
         cfg.presets[row] = Preset(name=name.strip(), args=shlex.split(args))
@@ -399,13 +405,21 @@ class SettingsDialog(QDialog):
         if cfg is not None:
             cfg.binary = self.in_binary.text().strip() or cfg.binary
             cfg.default_model = self.in_default_model.currentText().strip() or None
-            cfg.health_cmd = shlex.split(self.in_health_cmd.text()) if self.in_health_cmd.text().strip() else [cfg.binary, "--version"]
+            cfg.health_cmd = (
+                shlex.split(self.in_health_cmd.text())
+                if self.in_health_cmd.text().strip()
+                else [cfg.binary, "--version"]
+            )
             cfg.bypass = Bypass(
                 scheduled=shlex.split(self.in_bypass_sched.text()),
                 manual=shlex.split(self.in_bypass_manual.text()),
             )
         # Defaults
-        markers = [line.strip() for line in self.in_artifact_markers.toPlainText().splitlines() if line.strip()]
+        markers = [
+            line.strip()
+            for line in self.in_artifact_markers.toPlainText().splitlines()
+            if line.strip()
+        ]
         if not markers:
             markers = ["Saved:", "저장 완료:"]
         self.settings.defaults = Defaults(
