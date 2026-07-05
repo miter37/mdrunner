@@ -1,12 +1,20 @@
 """Allow `python -m mdrunner` to invoke either the CLI or the GUI.
 
-Default: GUI if PySide6 is importable and no extra args, else CLI.
-Use `python -m mdrunner run <id>` (or any other subcommand) to force CLI.
-Use `python -m mdrunner --cli <subcommand>` to force CLI explicitly.
+Behavior:
+    - With a known CLI subcommand (or --help/--version) → CLI
+    - With --cli → CLI
+    - With --gui → GUI
+    - No args → CLI help (avoids headless hang on display-less systems)
+
+Run the GUI explicitly with:
+    mdrunner --gui
+or
+    MDRUNNER_GUI=1 mdrunner
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import Sequence
 
@@ -39,18 +47,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .cli import main as cli_main
 
         return cli_main(args)
-    # Otherwise, launch the GUI.
-    try:
-        from .ui.main_window import main as gui_main
+    # Explicit GUI flag or env var.
+    if (args and args[0] == "--gui") or os.environ.get("MDRUNNER_GUI") == "1":
+        try:
+            from .ui.main_window import main as gui_main
 
-        return gui_main()
-    except ImportError as exc:
-        print(
-            f"PySide6 not available ({exc}). Install with: uv sync --extra gui",
-            file=sys.stderr,
-        )
-        print("Or run a CLI command: mdrunner list | preview | run | validate | health | init", file=sys.stderr)
-        return 2
+            return gui_main()
+        except ImportError as exc:
+            print(
+                f"PySide6 not available ({exc}). Install with: uv sync --extra gui",
+                file=sys.stderr,
+            )
+            return 2
+    # No args: show CLI help (instead of trying to launch the GUI, which hangs
+    # in headless environments).
+    from .cli import main as cli_main
+
+    return cli_main(["--help"])
 
 
 if __name__ == "__main__":

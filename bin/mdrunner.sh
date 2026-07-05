@@ -6,11 +6,15 @@
 #    bin/mdrunner.sh list
 #    bin/mdrunner.sh run smoke_test --mode scheduled
 #    bin/mdrunner.sh init
+#    bin/mdrunner.sh --gui        # launch the PySide6 GUI
 #
 #  Resolution order:
-#    1. frozen binary at ../dist/mdrunner
-#    2. central venv at $MDRUNNER_PYTHON or default /home/doyoonkim/APPs/Python314/venv/bin/python3.14
-#    3. PATH python3 + PYTHONPATH=..
+#    CLI mode (default):
+#      1. frozen binary at ../dist/mdrunner
+#      2. central venv at $MDRUNNER_PYTHON or default /home/doyoonkim/APPs/Python314/venv/bin/python3.14
+#      3. PATH python3 + PYTHONPATH=..
+#    GUI mode (--gui or MDRUNNER_GUI=1):
+#      Always via the central venv, since the frozen binary is CLI-only.
 # ==============================================================
 
 set -euo pipefail
@@ -18,13 +22,37 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MD_RUNNER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Detect GUI mode: --gui flag or MDRUNNER_GUI=1 env var
+GUI_MODE=0
+if [ "${1:-}" = "--gui" ] || [ -n "${MDRUNNER_GUI:-}" ]; then
+    GUI_MODE=1
+fi
+
+# Central venv (overridable)
+VENV_PYTHON="${MDRUNNER_PYTHON:-/home/doyounkim/APPs/Python314/venv/bin/python3.14}"
+
+# GUI mode → always use python (frozen binary is CLI-only)
+if [ "$GUI_MODE" -eq 1 ]; then
+    if [ -x "$VENV_PYTHON" ]; then
+        export PYTHONPATH="$MD_RUNNER_DIR"
+        exec "$VENV_PYTHON" -m mdrunner --gui "$@"
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        export PYTHONPATH="$MD_RUNNER_DIR"
+        exec python3 -m mdrunner --gui "$@"
+    fi
+    echo "Error: GUI mode needs a Python interpreter (frozen binary is CLI-only)." >&2
+    echo "Set MDRUNNER_PYTHON or install python3 with the central venv." >&2
+    exit 1
+fi
+
+# CLI mode
 # 1) Frozen binary
 if [ -x "$MD_RUNNER_DIR/dist/mdrunner" ]; then
     exec "$MD_RUNNER_DIR/dist/mdrunner" "$@"
 fi
 
-# 2) Central venv (overridable)
-VENV_PYTHON="${MDRUNNER_PYTHON:-/home/doyoonkim/APPs/Python314/venv/bin/python3.14}"
+# 2) Central venv
 if [ -x "$VENV_PYTHON" ]; then
     export PYTHONPATH="$MD_RUNNER_DIR"
     exec "$VENV_PYTHON" -m mdrunner "$@"

@@ -29,8 +29,10 @@ class TaskRunWorker(QThread):
         self.settings = settings
         self.mode = mode
         self.signals = _TaskSignals()
-        self.line.connect(self.signals.line)
-        self.finished_with_result.connect(self.signals.finished_with_result)
+        # Expose signals as direct attributes so call sites can do
+        # `worker.line.connect(...)` without reaching into `.signals`.
+        self.line = self.signals.line
+        self.finished_with_result = self.signals.finished_with_result
 
     def run(self) -> None:  # noqa: D401
         try:
@@ -122,8 +124,9 @@ class HealthCheckWorker(QThread):
         super().__init__()
         self.settings = settings
         self.signals = _HealthSignals()
-        self.results_ready.connect(self.signals.results_ready)
-        self.progress.connect(self.signals.progress)
+        # Expose signals as direct attributes (see TaskRunWorker note).
+        self.results_ready = self.signals.results_ready
+        self.progress = self.signals.progress
         self._cancel = False
 
     def cancel(self) -> None:
