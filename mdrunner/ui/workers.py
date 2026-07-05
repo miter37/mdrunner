@@ -150,3 +150,62 @@ class HealthCheckWorker(QThread):
                 }
             )
         self.signals.results_ready.emit(rows)
+
+
+class _ModelSignals(QObject):
+    models_ready = Signal(list)
+    error = Signal(str)
+
+
+class ModelFetchWorker(QThread):
+    """Fetches model lists for a given agent in a background thread."""
+
+    def __init__(self, agent_id: str, binary_path: str | None = None) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+        self.binary_path = binary_path
+        self.signals = _ModelSignals()
+        self.models_ready = self.signals.models_ready
+        self.error = self.signals.error
+
+    def run(self) -> None:
+        try:
+            from ..utils.models import fetch_agent_models
+            models = fetch_agent_models(self.agent_id, self.binary_path)
+            self.signals.models_ready.emit(models)
+        except Exception as e:
+            self.signals.error.emit(str(e))
+
+
+class _SingleHealthSignals(QObject):
+    progress = Signal(str)
+    finished = Signal(object)
+
+
+class SingleAgentHealthWorker(QThread):
+    """Runs a 4-step interactive health check for a single agent."""
+
+    def __init__(self, agent_id: str, binary: str, model: str | None) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+        self.binary = binary
+        self.model = model
+        self.signals = _SingleHealthSignals()
+        self.progress = self.signals.progress
+        self.finished = self.signals.finished
+
+    def run(self) -> None:
+        try:
+            from ..health import probe_health_interactive
+            result = probe_health_interactive(
+                self.agent_id,
+                self.binary,
+                self.model,
+                progress_callback=self.signals.progress.emit
+            )
+            self.signals.finished.emit(result)
+        except Exception as e:
+            from ..health import HealthResult
+            err_msg = f"헬스체크 내부 오류: {e}"
+            self.signals.progress.emit(f"✗ 오류: {err_msg}")
+            self.signals.finished.emit(HealthResult(ok=False, error=err_msg))
