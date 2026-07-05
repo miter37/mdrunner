@@ -48,15 +48,15 @@ def fake_agent_dir(tmp_path: Path) -> Path:
     script = d / "fakeagent"
     script.write_text(
         textwrap.dedent(
-            """\
+            f"""\
             #!/usr/bin/env bash
             # fake agent: echos its argv, prints a "Saved:" line, exits 0.
             echo "[fakeagent] argv: $@"
             # Simulate saved-file marker (also test Korean marker).
             # NOTE: single quotes around the path keep bash from treating
             # the backticks as command substitution.
-            echo 'Saved: /tmp/output.md'
-            echo '저장 완료: `/tmp/output-ko.md`'
+            echo 'Saved: {tmp_path}/output.md'
+            echo '저장 완료: `{tmp_path}/output-ko.md`'
             # exit non-zero if --fail appears anywhere in argv
             for arg in "$@"; do
                 if [ "$arg" = "--fail" ]; then exit 7; fi
@@ -75,7 +75,9 @@ def fake_agent_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
-def config_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_agent_dir: Path) -> tuple[Path, Path]:
+def config_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_agent_dir: Path
+) -> tuple[Path, Path]:
     monkeypatch.setenv("RUNCHER_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("RUNCHER_LOG_DIR", str(tmp_path / "log"))
     (tmp_path / "cfg").mkdir()
@@ -105,8 +107,14 @@ def write_settings(p: Path, binary: str = "fakeagent") -> Settings:
     return load_settings(p)
 
 
-def write_task(p: Path, *, prompt: Path, workdir: Path | None = None, timeout: int = 2,
-               extra: list[str] | None = None) -> None:
+def write_task(
+    p: Path,
+    *,
+    prompt: Path,
+    workdir: Path | None = None,
+    timeout: int = 2,
+    extra: list[str] | None = None,
+) -> None:
     import yaml
 
     raw = {
@@ -171,7 +179,6 @@ def test_detect_saved_file_absent() -> None:
     assert detect_saved_file("nothing here", ["Saved:", "저장 완료:"]) is None
 
 
-
 # ---------------------------------------------------------------------------
 # Runner end-to-end
 # ---------------------------------------------------------------------------
@@ -185,16 +192,17 @@ def test_run_task_success(tmp_path: Path, fake_agent_dir: Path, config_paths) ->
     write_task(tasks_p, prompt=prompt, workdir=tmp_path)
 
     settings = load_settings(settings_p)
-    result = run_task("t", mode="manual", settings=settings,
-                      tasks_file=tasks_p, settings_file=settings_p)
+    result = run_task(
+        "t", mode="manual", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+    )
 
     assert result.ok, result.error
     assert result.exit_code == 0
-    assert result.saved_file == "/tmp/output-ko.md"  # last-seen wins
+    assert result.saved_file == str(tmp_path / "output-ko.md")  # last-seen wins
     assert result.log_file and Path(result.log_file).exists()
     # log contains the agent's stdout
     log = Path(result.log_file).read_text(encoding="utf-8")
-    assert "Saved: /tmp/output.md" in log
+    assert f"Saved: {tmp_path}/output.md" in log
     assert "저장 완료" in log
 
 
@@ -208,8 +216,9 @@ def test_run_task_nonzero_exit(tmp_path: Path, fake_agent_dir: Path, config_path
     settings = load_settings(settings_p)
     # Pass --fail to the fake agent (extra args propagation)
     write_task(tasks_p, prompt=prompt, workdir=tmp_path, extra=["--fail"])
-    result = run_task("t", mode="manual", settings=settings,
-                      tasks_file=tasks_p, settings_file=settings_p)
+    result = run_task(
+        "t", mode="manual", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+    )
     assert not result.ok
     assert result.exit_code == 7
 
@@ -221,8 +230,9 @@ def test_run_task_binary_missing(tmp_path: Path, config_paths) -> None:
     write_settings(settings_p, binary="totally-missing-binary")
     write_task(tasks_p, prompt=prompt, workdir=tmp_path)
     settings = load_settings(settings_p)
-    result = run_task("t", mode="manual", settings=settings,
-                      tasks_file=tasks_p, settings_file=settings_p)
+    result = run_task(
+        "t", mode="manual", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+    )
     assert not result.ok
     assert "not found" in (result.error or "")
 
@@ -250,8 +260,9 @@ def test_run_task_disabled(tmp_path: Path, fake_agent_dir: Path, config_paths) -
     with tasks_p.open("w", encoding="utf-8") as fh:
         yaml.safe_dump(raw, fh)
     settings = load_settings(settings_p)
-    result = run_task("t", mode="manual", settings=settings,
-                      tasks_file=tasks_p, settings_file=settings_p)
+    result = run_task(
+        "t", mode="manual", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+    )
     assert not result.ok
     assert "disabled" in (result.error or "")
 
@@ -263,8 +274,9 @@ def test_preview_quotes_argv(tmp_path: Path, fake_agent_dir: Path, config_paths)
     write_settings(settings_p)
     write_task(tasks_p, prompt=prompt, workdir=tmp_path)
     settings = load_settings(settings_p)
-    info = preview_task("t", mode="manual", settings=settings,
-                        tasks_file=tasks_p, settings_file=settings_p)
+    info = preview_task(
+        "t", mode="manual", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+    )
     assert info["argv"][0] == "fakeagent"
     assert info["argv_quoted"][0] == "fakeagent"
     # quoted command should be shell-safe
@@ -272,9 +284,7 @@ def test_preview_quotes_argv(tmp_path: Path, fake_agent_dir: Path, config_paths)
     assert "fakeagent" in quoted
 
 
-def test_run_task_lock_blocks_second(
-    tmp_path: Path, fake_agent_dir: Path, config_paths
-) -> None:
+def test_run_task_lock_blocks_second(tmp_path: Path, fake_agent_dir: Path, config_paths) -> None:
     """Holding a long-lived lock should make a second run fail fast."""
     import threading
 
@@ -298,8 +308,9 @@ def test_run_task_lock_blocks_second(
     write_settings(settings_p)
     write_task(tasks_p, prompt=prompt, workdir=tmp_path)
     settings = load_settings(settings_p)
-    result = run_task("t", mode="manual", settings=settings,
-                      tasks_file=tasks_p, settings_file=settings_p)
+    result = run_task(
+        "t", mode="manual", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+    )
     assert not result.ok
     assert "already running" in (result.error or "")
 
@@ -313,17 +324,21 @@ def test_detect_saved_file_custom_markers() -> None:
     assert detect_saved_file(text, ["Saved:"]) is None
 
 
-def test_send_artifacts_integration_via_saved_file(tmp_path: Path, fake_agent_dir: Path, config_paths) -> None:
+def test_send_artifacts_integration_via_saved_file(
+    tmp_path: Path, fake_agent_dir: Path, config_paths
+) -> None:
     from unittest.mock import patch
+
     tasks_p, settings_p = config_paths
     prompt = tmp_path / "p.md"
     prompt.write_text("hello fake agent", encoding="utf-8")
-    
+
     # Create the fake output file to be detected
     fake_out_file = tmp_path / "output-ko.md"
     fake_out_file.write_text("dummy output file", encoding="utf-8")
-    
+
     import yaml
+
     raw_settings = {
         "agents": {
             "fake": {
@@ -338,7 +353,7 @@ def test_send_artifacts_integration_via_saved_file(tmp_path: Path, fake_agent_di
         "defaults": {
             "timeout_minutes": 5,
             "artifact_markers": ["Saved:", "저장 완료:"],
-            "artifact_time_window_seconds": 30
+            "artifact_time_window_seconds": 30,
         },
     }
     with settings_p.open("w", encoding="utf-8") as fh:
@@ -364,49 +379,39 @@ def test_send_artifacts_integration_via_saved_file(tmp_path: Path, fake_agent_di
     with tasks_p.open("w", encoding="utf-8") as fh:
         yaml.safe_dump(raw_tasks, fh)
 
-    mock_telegram_cfg = {
-        "bot_token": "token123",
-        "chat_id": "chat456"
-    }
+    mock_telegram_cfg = {"bot_token": "token123", "chat_id": "chat456"}
 
-    # Since the fake agent hardcodes /tmp/output-ko.md, let's write a mock or write a temporary script.
-    # Actually, we can patch `Path.exists` and `Path.is_file` to return True for '/tmp/output-ko.md'
-    # or write a file directly to '/tmp/output-ko.md'. Since `/tmp` is writable, let's write to `/tmp/output-ko.md` and clean it up.
-    tmp_out = Path("/tmp/output-ko.md")
-    tmp_out.write_text("dummy output file", encoding="utf-8")
+    with (
+        patch("mdrunner.ui._telegram_settings.load", return_value=mock_telegram_cfg),
+        patch("mdrunner.telegram.send_document") as mock_send,
+    ):
+        settings = load_settings(settings_p)
+        result = run_task(
+            "t", mode="manual", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+        )
 
-    try:
-        with patch("mdrunner.ui._telegram_settings.load", return_value=mock_telegram_cfg), \
-             patch("mdrunner.telegram.send_document") as mock_send:
-            
-            settings = load_settings(settings_p)
-            result = run_task("t", mode="manual", settings=settings,
-                              tasks_file=tasks_p, settings_file=settings_p)
-            
-            assert result.ok
-            assert result.saved_file == "/tmp/output-ko.md"
-            assert mock_send.call_count == 1
-            args, kwargs = mock_send.call_args
-            assert kwargs["bot_token"] == "token123"
-            assert kwargs["chat_id"] == "chat456"
-            assert kwargs["file_path"] == "/tmp/output-ko.md"
-            assert "T" in kwargs["caption"]
-            assert "소요 시간" in kwargs["caption"]
-    finally:
-        try:
-            tmp_out.unlink()
-        except FileNotFoundError:
-            pass
+        assert result.ok
+        assert result.saved_file == str(tmp_path / "output-ko.md")
+        assert mock_send.call_count == 1
+        args, kwargs = mock_send.call_args
+        assert kwargs["bot_token"] == "token123"
+        assert kwargs["chat_id"] == "chat456"
+        assert kwargs["file_path"] == str(tmp_path / "output-ko.md")
+        assert "T" in kwargs["caption"]
+        assert "소요 시간" in kwargs["caption"]
 
 
-def test_send_artifacts_integration_via_fallback(tmp_path: Path, fake_agent_dir: Path, config_paths) -> None:
+def test_send_artifacts_integration_via_fallback(
+    tmp_path: Path, fake_agent_dir: Path, config_paths
+) -> None:
     from unittest.mock import patch
-    
+
     tasks_p, settings_p = config_paths
     prompt = tmp_path / "p.md"
     prompt.write_text("hello fake agent", encoding="utf-8")
-    
+
     import yaml
+
     raw_settings = {
         "agents": {
             "fake": {
@@ -421,7 +426,7 @@ def test_send_artifacts_integration_via_fallback(tmp_path: Path, fake_agent_dir:
         "defaults": {
             "timeout_minutes": 5,
             "artifact_markers": ["NonexistentMarker:"],
-            "artifact_time_window_seconds": 10
+            "artifact_time_window_seconds": 10,
         },
     }
     with settings_p.open("w", encoding="utf-8") as fh:
@@ -449,22 +454,21 @@ def test_send_artifacts_integration_via_fallback(tmp_path: Path, fake_agent_dir:
 
     art_dir = tmp_path / "artifacts"
     art_dir.mkdir()
-    
+
     art_file = art_dir / "result.txt"
     art_file.write_text("my artifact", encoding="utf-8")
-    
-    mock_telegram_cfg = {
-        "bot_token": "token123",
-        "chat_id": "chat456"
-    }
-    
-    with patch("mdrunner.ui._telegram_settings.load", return_value=mock_telegram_cfg), \
-         patch("mdrunner.telegram.send_document") as mock_send:
-        
+
+    mock_telegram_cfg = {"bot_token": "token123", "chat_id": "chat456"}
+
+    with (
+        patch("mdrunner.ui._telegram_settings.load", return_value=mock_telegram_cfg),
+        patch("mdrunner.telegram.send_document") as mock_send,
+    ):
         settings = load_settings(settings_p)
-        result = run_task("t", mode="manual", settings=settings,
-                          tasks_file=tasks_p, settings_file=settings_p)
-        
+        result = run_task(
+            "t", mode="manual", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+        )
+
         assert result.ok
         assert mock_send.call_count == 1
         args, kwargs = mock_send.call_args
@@ -475,15 +479,18 @@ def test_send_artifacts_integration_via_fallback(tmp_path: Path, fake_agent_dir:
         assert "소요 시간" in kwargs["caption"]
 
 
-def test_send_artifacts_integration_fallback_outside_window(tmp_path: Path, fake_agent_dir: Path, config_paths) -> None:
+def test_send_artifacts_integration_fallback_outside_window(
+    tmp_path: Path, fake_agent_dir: Path, config_paths
+) -> None:
     from unittest.mock import patch, MagicMock
     import time
-    
+
     tasks_p, settings_p = config_paths
     prompt = tmp_path / "p.md"
     prompt.write_text("hello fake agent", encoding="utf-8")
-    
+
     import yaml
+
     raw_settings = {
         "agents": {
             "fake": {
@@ -498,7 +505,7 @@ def test_send_artifacts_integration_fallback_outside_window(tmp_path: Path, fake
         "defaults": {
             "timeout_minutes": 5,
             "artifact_markers": ["NonexistentMarker:"],
-            "artifact_time_window_seconds": 10
+            "artifact_time_window_seconds": 10,
         },
     }
     with settings_p.open("w", encoding="utf-8") as fh:
@@ -526,18 +533,16 @@ def test_send_artifacts_integration_fallback_outside_window(tmp_path: Path, fake
 
     art_dir = tmp_path / "artifacts"
     art_dir.mkdir()
-    
+
     art_file = art_dir / "old_result.txt"
     art_file.write_text("old artifact", encoding="utf-8")
-    
+
     old_time = time.time() - 3600
-    
-    mock_telegram_cfg = {
-        "bot_token": "token123",
-        "chat_id": "chat456"
-    }
-    
+
+    mock_telegram_cfg = {"bot_token": "token123", "chat_id": "chat456"}
+
     orig_stat = Path.stat
+
     def mock_stat(self):
         if self.name == "old_result.txt":
             res = MagicMock()
@@ -545,14 +550,16 @@ def test_send_artifacts_integration_fallback_outside_window(tmp_path: Path, fake
             res.st_ctime = old_time
             return res
         return orig_stat(self)
-        
-    with patch("mdrunner.ui._telegram_settings.load", return_value=mock_telegram_cfg), \
-         patch("mdrunner.telegram.send_document") as mock_send, \
-         patch("pathlib.Path.stat", mock_stat):
-        
+
+    with (
+        patch("mdrunner.ui._telegram_settings.load", return_value=mock_telegram_cfg),
+        patch("mdrunner.telegram.send_document") as mock_send,
+        patch("pathlib.Path.stat", mock_stat),
+    ):
         settings = load_settings(settings_p)
-        result = run_task("t", mode="manual", settings=settings,
-                          tasks_file=tasks_p, settings_file=settings_p)
-        
+        result = run_task(
+            "t", mode="manual", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+        )
+
         assert result.ok
         assert mock_send.call_count == 0

@@ -125,12 +125,13 @@ def detect_saved_file(text: str, markers: list[str]) -> str | None:
                 tail = tail.strip("`\"'<> ")
                 # extract first plausible absolute path
                 for token in tail.split():
-                    if token.startswith("/") or (len(token) > 2 and token[1] == ":" and token[2] == "\\"):
+                    if token.startswith("/") or (
+                        len(token) > 2 and token[1] == ":" and token[2] == "\\"
+                    ):
                         last = token
                         break
                 break  # one marker per line
     return last
-
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +201,7 @@ def run_task(
         settings = load_settings(None if settings_file is None else str(settings_file))
     if tasks_file is None:
         from .utils.paths import tasks_file as _tasks_file
+
         tasks_path = _tasks_file()
     else:
         tasks_path = tasks_file
@@ -240,31 +242,30 @@ def run_task(
 def _send_result_artifacts_via_telegram(task: Task, settings: Settings, result: RunResult) -> None:
     from .ui import _telegram_settings
     from . import telegram
-    
+
     cfg = _telegram_settings.load()
     bot_token = cfg.get("bot_token")
     chat_id = cfg.get("chat_id")
     if not bot_token or not chat_id:
         return
-        
+
     # 결과물 수집 리스트
     files_to_send = []
-    
+
     # 1순위: 로그에서 파싱된 파일이 유효한 경우
     if result.saved_file:
         p = Path(result.saved_file).expanduser()
         if p.exists() and p.is_file():
             files_to_send.append(p)
-            
+
     # 2순위: 1순위 검출 실패 시 디렉터리 타임스탬프 관측 스캔
     if not files_to_send and task.artifact_dir:
         dir_path = Path(task.artifact_dir).expanduser()
         if dir_path.exists() and dir_path.is_dir():
             window = settings.defaults.artifact_time_window_seconds
-            now = time.time()
             # finished_at 기준 최근 N초 내의 범위
             start_limit = result.finished_at - window
-            
+
             # 재귀적으로 탐색
             for root, _, files in os.walk(str(dir_path)):
                 for file in files:
@@ -275,25 +276,32 @@ def _send_result_artifacts_via_telegram(task: Task, settings: Settings, result: 
                             mtime = fp.stat().st_mtime
                             ctime = fp.stat().st_ctime
                             # 최근 생성/수정 시간 조건 매칭
-                            if (start_limit <= mtime <= result.finished_at + 2) or (start_limit <= ctime <= result.finished_at + 2):
+                            if (start_limit <= mtime <= result.finished_at + 2) or (
+                                start_limit <= ctime <= result.finished_at + 2
+                            ):
                                 files_to_send.append(fp)
-                        except Exception:
+                        except OSError:
                             pass
-                            
+
     # 파일 전송 실행
+    model_name = task.model or "기본 모델"
+    if "--model" in result.argv:
+        try:
+            idx = result.argv.index("--model")
+            if idx + 1 < len(result.argv):
+                model_name = result.argv[idx + 1]
+        except ValueError:
+            pass
+
     for fp in files_to_send:
         caption = (
             f"✅ [mdrunner] '{task.name}' 결과물 전송\n"
-            f"- 실행 모델: {result.argv[result.argv.index('--model')+1] if '--model' in result.argv else (task.model or '기본 모델')}\n"
+            f"- 실행 모델: {model_name}\n"
             f"- 소요 시간: {result.duration_seconds:.1f}초"
         )
         telegram.send_document(
-            bot_token=bot_token,
-            chat_id=chat_id,
-            file_path=str(fp),
-            caption=caption
+            bot_token=bot_token, chat_id=chat_id, file_path=str(fp), caption=caption
         )
-
 
 
 def _execute(
@@ -470,6 +478,7 @@ def preview_task(
         settings = load_settings(None if settings_file is None else str(settings_file))
     if tasks_file is None:
         from .utils.paths import tasks_file as _tasks_file
+
         tasks_path = _tasks_file()
     else:
         tasks_path = tasks_file
