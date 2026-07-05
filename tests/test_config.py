@@ -112,3 +112,65 @@ def test_save_load_settings(tmp_path: Path) -> None:
     save_settings(p, s)
     again = load_settings(p)
     assert again == s
+
+
+def test_artifact_config_roundtrip(tmp_path: Path) -> None:
+    # 1. Test Task with new fields set explicitly
+    task_raw = {
+        "id": "artifact-task",
+        "name": "Artifact Task",
+        "notify_artifact": True,
+        "artifact_dir": "/path/to/artifacts",
+        "artifact_extensions": [".txt", ".json"],
+    }
+    t = task_from_dict(task_raw)
+    assert t.notify_artifact is True
+    assert t.artifact_dir == "/path/to/artifacts"
+    assert t.artifact_extensions == [".txt", ".json"]
+
+    # Roundtrip Task
+    task_dict = task_to_dict(t)
+    assert task_dict["notify_artifact"] is True
+    assert task_dict["artifact_dir"] == "/path/to/artifacts"
+    assert task_dict["artifact_extensions"] == [".txt", ".json"]
+    assert task_from_dict(task_dict) == t
+
+    # 2. Test Task defaults when fields are omitted
+    task_default_raw = {
+        "id": "default-task",
+        "name": "Default Task",
+    }
+    t_def = task_from_dict(task_default_raw)
+    assert t_def.notify_artifact is False
+    assert t_def.artifact_dir is None
+    assert t_def.artifact_extensions == [".md"]
+
+    # 3. Test Settings with new defaults fields set explicitly
+    settings_raw = {
+        "agents": {},
+        "defaults": {
+            "timeout_minutes": 15,
+            "artifact_markers": ["Saved to:", "Artifact:"],
+            "artifact_time_window_seconds": 60,
+        },
+    }
+    s = settings_from_dict(settings_raw)
+    assert s.defaults.artifact_markers == ["Saved to:", "Artifact:"]
+    assert s.defaults.artifact_time_window_seconds == 60
+
+    # Roundtrip Settings
+    settings_dict = settings_to_dict(s)
+    assert settings_dict["defaults"]["artifact_markers"] == ["Saved to:", "Artifact:"]
+    assert settings_dict["defaults"]["artifact_time_window_seconds"] == 60
+    assert settings_from_dict(settings_dict) == s
+
+    # 4. Test Settings defaults when fields are omitted
+    settings_default_raw = {
+        "agents": {},
+        "defaults": {
+            "timeout_minutes": 10,
+        },
+    }
+    s_def = settings_from_dict(settings_default_raw)
+    assert s_def.defaults.artifact_markers == ["Saved:", "저장 완료:"]
+    assert s_def.defaults.artifact_time_window_seconds == 30

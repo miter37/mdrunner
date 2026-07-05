@@ -58,6 +58,9 @@ class Task:
     extra_args: list[str] = field(default_factory=list)
     timeout_minutes: int = 10
     on_failure: OnFailure = field(default_factory=OnFailure)
+    notify_artifact: bool = False
+    artifact_dir: str | None = None
+    artifact_extensions: list[str] = field(default_factory=lambda: [".md"])
 
 
 def task_from_dict(data: dict[str, Any]) -> Task:
@@ -101,6 +104,9 @@ def task_from_dict(data: dict[str, Any]) -> Task:
         extra_args=[str(x) for x in data.get("extra_args", [])],
         timeout_minutes=int(data.get("timeout_minutes", 10)),
         on_failure=on_failure,
+        notify_artifact=bool(data.get("notify_artifact", False)),
+        artifact_dir=(str(data["artifact_dir"]) if data.get("artifact_dir") else None),
+        artifact_extensions=[str(x) for x in data.get("artifact_extensions", [".md"])],
     )
 
 
@@ -123,6 +129,9 @@ def task_to_dict(task: Task) -> dict[str, Any]:
         "extra_args": task.extra_args,
         "timeout_minutes": task.timeout_minutes,
         "on_failure": {"notify": task.on_failure.notify},
+        "notify_artifact": task.notify_artifact,
+        "artifact_dir": task.artifact_dir,
+        "artifact_extensions": task.artifact_extensions,
     }
 
 
@@ -156,6 +165,8 @@ class AgentConfig:
 @dataclass
 class Defaults:
     timeout_minutes: int = 10
+    artifact_markers: list[str] = field(default_factory=lambda: ["Saved:", "저장 완료:"])
+    artifact_time_window_seconds: int = 30
 
 
 @dataclass
@@ -209,6 +220,8 @@ def settings_from_dict(data: dict[str, Any]) -> Settings:
     defaults_data = data.get("defaults") or {}
     defaults = Defaults(
         timeout_minutes=int(defaults_data.get("timeout_minutes", 10)),
+        artifact_markers=[str(x) for x in defaults_data.get("artifact_markers", ["Saved:", "저장 완료:"])],
+        artifact_time_window_seconds=int(defaults_data.get("artifact_time_window_seconds", 30)),
     )
     return Settings(agents=agents, defaults=defaults)
 
@@ -219,7 +232,11 @@ def settings_to_dict(settings: Settings) -> dict[str, Any]:
             agent_id: agent_to_dict(agent_id, cfg)
             for agent_id, cfg in settings.agents.items()
         },
-        "defaults": {"timeout_minutes": settings.defaults.timeout_minutes},
+        "defaults": {
+            "timeout_minutes": settings.defaults.timeout_minutes,
+            "artifact_markers": settings.defaults.artifact_markers,
+            "artifact_time_window_seconds": settings.defaults.artifact_time_window_seconds,
+        },
     }
 
 
