@@ -22,6 +22,38 @@ cd mdrunner
 uv sync --extra gui --extra build
 ```
 
+Or use the central Python 3.14 venv (recommended for multi-app setups):
+
+```bash
+# Central venv once (e.g. /home/doyoonkim/APPs/Python314/venv)
+uv python install 3.14
+uv venv --python 3.14 /home/doyoonkim/APPs/Python314/venv
+/home/doyoonkim/APPs/Python314/venv/bin/pip install -e /path/to/mdrunner[gui,build,dev]
+```
+
+## Launchers
+
+`bin/` ships with two platform-specific launchers that resolve a runnable
+interpreter in the same order:
+
+1. **frozen binary** — `dist/mdrunner` (Linux/macOS) or `dist\mdrunner.exe` (Windows)
+2. **central venv** — `bin/mdrunner.sh` defaults to `/home/doyoonkim/APPs/Python314/venv/`
+   (override with `MDRUNNER_PYTHON=...` env var); `bin/mdrunner.bat` defaults to
+   `C:\Users\default\AppData\Local\Programs\Python\Python314\venv\Scripts\python.exe`
+3. **PATH python3 / python** as last-resort fallback
+
+```bash
+# Linux / macOS
+bin/mdrunner.sh list
+bin/mdrunner.sh run smoke_test --mode scheduled
+RUNCHER_CONFIG_DIR=/some/path bin/mdrunner.sh list
+
+# Windows (PowerShell or cmd)
+bin\mdrunner.bat list
+bin\mdrunner.bat run smoke_test --mode scheduled
+set MDRUNNER_CONFIG_DIR=C:\some\path && bin\mdrunner.bat list
+```
+
 ## Quick start
 
 ```bash
