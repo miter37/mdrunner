@@ -1,5 +1,4 @@
-import pytest
-from mdrunner.health import probe_health_interactive, HealthResult
+from mdrunner.health import probe_health_interactive
 
 def test_probe_health_interactive_missing():
     steps = []

@@ -1,4 +1,3 @@
-import pytest
 from mdrunner.utils.models import fetch_agent_models
 
 def test_fetch_agent_models_static():

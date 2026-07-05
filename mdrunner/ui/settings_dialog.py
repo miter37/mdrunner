@@ -36,7 +36,6 @@ from ..config import (
     Preset,
     Settings,
 )
-from ..health import bypass_risk_level, probe_health
 
 
 class SettingsDialog(QDialog):
