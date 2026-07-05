@@ -353,6 +353,20 @@ class SettingsDialog(QDialog):
         self.in_default_timeout.setSuffix(" min")
         self.in_default_timeout.setValue(self.settings.defaults.timeout_minutes)
         f.addRow("Default task timeout", self.in_default_timeout)
+
+        # 신규 필드 추가
+        self.in_artifact_markers = QPlainTextEdit(w)
+        self.in_artifact_markers.setPlaceholderText("한 줄에 하나씩 마커 입력")
+        self.in_artifact_markers.setMaximumHeight(80)
+        self.in_artifact_markers.setPlainText("\n".join(self.settings.defaults.artifact_markers))
+        f.addRow("Result Log Markers", self.in_artifact_markers)
+
+        self.in_artifact_window = QSpinBox(w)
+        self.in_artifact_window.setRange(1, 3600)
+        self.in_artifact_window.setSuffix(" sec")
+        self.in_artifact_window.setValue(self.settings.defaults.artifact_time_window_seconds)
+        f.addRow("Result Time Window", self.in_artifact_window)
+
         return w
 
     # =================================================== Notifications tab
@@ -391,7 +405,14 @@ class SettingsDialog(QDialog):
                 manual=shlex.split(self.in_bypass_manual.text()),
             )
         # Defaults
-        self.settings.defaults = Defaults(timeout_minutes=self.in_default_timeout.value())
+        markers = [line.strip() for line in self.in_artifact_markers.toPlainText().splitlines() if line.strip()]
+        if not markers:
+            markers = ["Saved:", "저장 완료:"]
+        self.settings.defaults = Defaults(
+            timeout_minutes=self.in_default_timeout.value(),
+            artifact_markers=markers,
+            artifact_time_window_seconds=self.in_artifact_window.value(),
+        )
         # Telegram settings stored in a small sidecar file (Phase 4)
         from . import _telegram_settings
 

@@ -225,6 +225,49 @@ class TaskDialog(QDialog):
 
         outer.addWidget(gb_sched)
 
+        # --- 알림 설정 (Telegram Notification) ---
+        gb_notify = QGroupBox("Telegram Notification", self)
+        fn = QFormLayout(gb_notify)
+        
+        self.in_notify_fail = QCheckBox("실패 시 텔레그램 알림 전송 (On Failure)", gb_notify)
+        if task:
+            self.in_notify_fail.setChecked(task.on_failure.notify)
+        fn.addRow("", self.in_notify_fail)
+        
+        self.in_notify_artifact = QCheckBox("성공 시 결과물 파일 전송 (Send Artifact)", gb_notify)
+        if task:
+            self.in_notify_artifact.setChecked(task.notify_artifact)
+        fn.addRow("", self.in_notify_artifact)
+        
+        self.in_artifact_dir = QLineEdit(gb_notify)
+        self.in_artifact_dir.setPlaceholderText("(선택 사항) 결과물이 저장될 폴더 경로")
+        if task and task.artifact_dir:
+            self.in_artifact_dir.setText(task.artifact_dir)
+        btn_art_dir = QPushButton("Browse…", gb_notify)
+        
+        def pick_art_dir():
+            path = QFileDialog.getExistingDirectory(self, "Select artifact output directory", self.in_artifact_dir.text() or str(Path.home()))
+            if path:
+                self.in_artifact_dir.setText(path)
+                
+        btn_art_dir.clicked.connect(pick_art_dir)
+        row_art = QWidget(gb_notify)
+        row_art_lay = QHBoxLayout(row_art)
+        row_art_lay.setContentsMargins(0, 0, 0, 0)
+        row_art_lay.addWidget(self.in_artifact_dir, 1)
+        row_art_lay.addWidget(btn_art_dir)
+        fn.addRow("Result Directory", row_art)
+        
+        self.in_artifact_ext = QLineEdit(gb_notify)
+        self.in_artifact_ext.setPlaceholderText("콤마로 구분, 예: .md, .png (기본값: .md)")
+        if task and task.artifact_extensions:
+            self.in_artifact_ext.setText(", ".join(task.artifact_extensions))
+        else:
+            self.in_artifact_ext.setText(".md")
+        fn.addRow("Extensions filter", self.in_artifact_ext)
+        
+        outer.addWidget(gb_notify)
+
         # --- Preview ---
         gb_prev = QGroupBox("Preview command", self)
         fp2 = QVBoxLayout(gb_prev)
@@ -257,6 +300,13 @@ class TaskDialog(QDialog):
         self.in_time.timeChanged.connect(self._refresh_preview)
         self.in_tz.currentTextChanged.connect(self._refresh_preview)
         self.in_interval.valueChanged.connect(self._refresh_preview)
+        
+        self.in_notify_artifact.toggled.connect(self._toggle_artifact_fields)
+        self._toggle_artifact_fields(self.in_notify_artifact.isChecked())
+
+    def _toggle_artifact_fields(self, checked: bool) -> None:
+        self.in_artifact_dir.setEnabled(checked)
+        self.in_artifact_ext.setEnabled(checked)
 
     # ---------------------------------------------------------- event handlers
 
@@ -313,6 +363,10 @@ class TaskDialog(QDialog):
         self.in_extra.clear()
         for code, cb in self.day_checks.items():
             cb.setChecked(code in ("mon", "tue", "wed", "thu", "fri"))
+        self.in_notify_fail.setChecked(False)
+        self.in_notify_artifact.setChecked(False)
+        self.in_artifact_dir.clear()
+        self.in_artifact_ext.setText(".md")
         self._refresh_preview()
 
     def _refresh_preview(self) -> None:
@@ -369,6 +423,11 @@ class TaskDialog(QDialog):
         from ..cli import load_tasks
 
         tasks = load_tasks(tasks_file())
+        
+        ext_list = [x.strip() for x in self.in_artifact_ext.text().split(",") if x.strip()]
+        if not ext_list:
+            ext_list = [".md"]
+            
         new_task = Task(
             id=self.task_id,
             name=name,
@@ -380,7 +439,10 @@ class TaskDialog(QDialog):
             schedule=self._build_schedule(),
             extra_args=shlex_split(self.in_extra.text()),
             timeout_minutes=self.in_timeout.value(),
-            on_failure=OnFailure(notify=False),
+            on_failure=OnFailure(notify=self.in_notify_fail.isChecked()),
+            notify_artifact=self.in_notify_artifact.isChecked(),
+            artifact_dir=self.in_artifact_dir.text().strip() or None,
+            artifact_extensions=ext_list,
         )
         # Replace if same id
         tasks = [t for t in tasks if t.id != new_task.id]
