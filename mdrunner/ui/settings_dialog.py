@@ -328,12 +328,16 @@ class SettingsDialog(QDialog):
     def _on_detect_binary(self) -> None:
         import shutil
 
-        path = shutil.which(self.in_binary.text().strip())
+        aid = self._current_agent_id()
+        query = self.in_binary.text().strip() or aid
+        if not query:
+            return
+        path = shutil.which(query)
         if path:
             self.in_binary.setText(path)
             QMessageBox.information(self, "Detected", f"Found: {path}")
         else:
-            QMessageBox.warning(self, "Not found", f"{self.in_binary.text()!r} not found on PATH")
+            QMessageBox.warning(self, "Not found", f"{query!r} not found on PATH")
 
     def _on_health_button(self) -> None:
         aid = self._current_agent_id()
@@ -455,6 +459,13 @@ class SettingsDialog(QDialog):
         self.cb_tg_failure = QCheckBox("Notify on failure", w)
         self.cb_tg_failure.setChecked(True)
         f.addRow("", self.cb_tg_failure)
+
+        from . import _telegram_settings
+        cfg = _telegram_settings.load()
+        self.in_tg_token.setText(cfg.get("bot_token", ""))
+        self.in_tg_chat.setText(cfg.get("chat_id", ""))
+        self.cb_tg_failure.setChecked(cfg.get("notify_on_failure", True))
+
         note = QLabel(
             "Telegram notifications are configured at the mdrunner level (global). "
             "Each task can additionally set on_failure.notify=true in tasks.yaml.",

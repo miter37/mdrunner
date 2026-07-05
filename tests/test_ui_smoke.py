@@ -320,3 +320,136 @@ def test_settings_dialog_deepcopy_and_persistence(app_and_window) -> None:
     assert orig_alpha_cfg.bypass.manual == ["--man-a"]
 
     dlg.deleteLater()
+
+
+@pytest.mark.gui
+def test_settings_dialog_notifications_loading(app_and_window) -> None:
+    _app, win = app_and_window
+    from mdrunner.ui.settings_dialog import SettingsDialog
+    from mdrunner.config import Settings
+    from mdrunner.ui import _telegram_settings
+
+    # Save mock telegram settings first
+    mock_data = {
+        "bot_token": "12345:mock_token",
+        "chat_id": "-987654321",
+        "notify_on_failure": False,
+    }
+    _telegram_settings.save(mock_data)
+
+    settings = Settings()
+    dlg = SettingsDialog(parent=win, settings=settings)
+
+    # Check that UI loaded values correctly
+    assert dlg.in_tg_token.text() == "12345:mock_token"
+    assert dlg.in_tg_chat.text() == "-987654321"
+    assert dlg.cb_tg_failure.isChecked() is False
+
+    # Modify values
+    dlg.in_tg_token.setText("new_token")
+    dlg.in_tg_chat.setText("new_chat_id")
+    dlg.cb_tg_failure.setChecked(True)
+
+    # Accept changes
+    dlg._on_accept()
+
+    # Verify settings are saved back
+    saved_cfg = _telegram_settings.load()
+    assert saved_cfg["bot_token"] == "new_token"
+    assert saved_cfg["chat_id"] == "new_chat_id"
+    assert saved_cfg["notify_on_failure"] is True
+
+    dlg.deleteLater()
+
+
+@pytest.mark.gui
+def test_settings_dialog_agent_switch_persistence(app_and_window) -> None:
+    _app, win = app_and_window
+    from mdrunner.ui.settings_dialog import SettingsDialog
+    from mdrunner.config import Settings, AgentConfig
+
+    agents = {
+        "alpha": AgentConfig(binary="alpha", default_model="model-a"),
+        "bravo": AgentConfig(binary="bravo", default_model="model-b"),
+    }
+    settings = Settings(agents=agents)
+    dlg = SettingsDialog(parent=win, settings=settings)
+
+    # 1. Modify alpha settings in the UI
+    assert dlg.agent_list.currentRow() == 0
+    dlg.in_binary.setText("alpha-modified")
+    dlg.in_health_cmd.setText("alpha-modified-health")
+
+    # 2. Switch to bravo
+    dlg.agent_list.setCurrentRow(1)
+    # Check that UI loaded bravo settings
+    assert dlg.in_binary.text() == "bravo"
+
+    # 3. Switch back to alpha
+    dlg.agent_list.setCurrentRow(0)
+    # Check that UI restored the modified alpha settings
+    assert dlg.in_binary.text() == "alpha-modified"
+    assert dlg.in_health_cmd.text() == "alpha-modified-health"
+
+    dlg.deleteLater()
+
+
+@pytest.mark.gui
+def test_settings_dialog_cancel_integrity(app_and_window) -> None:
+    _app, win = app_and_window
+    from mdrunner.ui.settings_dialog import SettingsDialog
+    from mdrunner.config import Settings, AgentConfig
+
+    agents = {
+        "alpha": AgentConfig(binary="alpha", default_model="model-a"),
+    }
+    settings = Settings(agents=agents)
+    dlg = SettingsDialog(parent=win, settings=settings)
+
+    # 1. Modify the UI inputs
+    dlg.in_binary.setText("alpha-modified")
+    dlg.in_default_timeout.setValue(99)
+
+    # Simulate rejection / Cancel click
+    dlg.reject()
+
+    assert settings.agents["alpha"].binary == "alpha"
+    assert settings.defaults.timeout_minutes == 10  # default is 10
+
+    # Verify that the dialog's settings object, even if modified, did not leak back to the original
+    assert settings is not dlg.settings
+
+    dlg.deleteLater()
+
+
+@pytest.mark.gui
+def test_settings_dialog_detect_binary_fallback(app_and_window, monkeypatch) -> None:
+    _app, win = app_and_window
+    from mdrunner.ui.settings_dialog import SettingsDialog
+    from mdrunner.config import Settings, AgentConfig
+    import shutil
+
+    agents = {
+        "my-special-agent": AgentConfig(binary=""),
+    }
+    settings = Settings(agents=agents)
+    dlg = SettingsDialog(parent=win, settings=settings)
+
+    # Mock shutil.which to return a dummy path for "my-special-agent"
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/my-special-agent" if cmd == "my-special-agent" else None)
+
+    # in_binary is empty initially (as binary is "")
+    assert dlg.in_binary.text() == ""
+
+    # Mock QMessageBox.information to do nothing
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: None)
+
+    # Trigger detect binary
+    dlg._on_detect_binary()
+
+    # The fallback should use "my-special-agent" as query and find /usr/bin/my-special-agent
+    assert dlg.in_binary.text() == "/usr/bin/my-special-agent"
+
+    dlg.deleteLater()
+
