@@ -107,11 +107,7 @@ class RunResult:
 # ---------------------------------------------------------------------------
 
 
-_SAVED_MARKER_KO = "저장 완료:"
-_SAVED_MARKER_EN = "Saved:"
-
-
-def detect_saved_file(text: str) -> str | None:
+def detect_saved_file(text: str, markers: list[str]) -> str | None:
     """Return the LAST saved-file path found in the agent output, if any.
 
     The most recent save marker is almost always the real artifact, since
@@ -122,11 +118,7 @@ def detect_saved_file(text: str) -> str | None:
         s = line.strip()
         if not s:
             continue
-        # Common forms observed across md-driven skills:
-        #   "저장 완료: `/path/to/file.md`"
-        #   "> 저장 완료: `/path/to/file.md`"
-        #   "Saved: /path/to/file.md"
-        for marker in (_SAVED_MARKER_KO, _SAVED_MARKER_EN):
+        for marker in markers:
             if marker in s:
                 tail = s.split(marker, 1)[1].strip()
                 # strip surrounding quotes / angle brackets / backticks
@@ -138,6 +130,7 @@ def detect_saved_file(text: str) -> str | None:
                         break
                 break  # one marker per line
     return last
+
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +231,69 @@ def run_task(
             error=f"no settings for agent {task.agent!r} (add it to settings.yaml)",
         )
 
-    return _execute(task, agent_cfg, settings.defaults, mode, timeout_override)
+    result = _execute(task, agent_cfg, settings.defaults, mode, timeout_override)
+    if result.ok and task.notify_artifact:
+        _send_result_artifacts_via_telegram(task, settings, result)
+    return result
+
+
+def _send_result_artifacts_via_telegram(task: Task, settings: Settings, result: RunResult) -> None:
+    from .ui import _telegram_settings
+    from . import telegram
+    
+    cfg = _telegram_settings.load()
+    bot_token = cfg.get("bot_token")
+    chat_id = cfg.get("chat_id")
+    if not bot_token or not chat_id:
+        return
+        
+    # 결과물 수집 리스트
+    files_to_send = []
+    
+    # 1순위: 로그에서 파싱된 파일이 유효한 경우
+    if result.saved_file:
+        p = Path(result.saved_file).expanduser()
+        if p.exists() and p.is_file():
+            files_to_send.append(p)
+            
+    # 2순위: 1순위 검출 실패 시 디렉터리 타임스탬프 관측 스캔
+    if not files_to_send and task.artifact_dir:
+        dir_path = Path(task.artifact_dir).expanduser()
+        if dir_path.exists() and dir_path.is_dir():
+            window = settings.defaults.artifact_time_window_seconds
+            now = time.time()
+            # finished_at 기준 최근 N초 내의 범위
+            start_limit = result.finished_at - window
+            
+            # 재귀적으로 탐색
+            for root, _, files in os.walk(str(dir_path)):
+                for file in files:
+                    fp = Path(root) / file
+                    # 확장자 검사
+                    if fp.suffix.lower() in [ext.lower() for ext in task.artifact_extensions]:
+                        try:
+                            mtime = fp.stat().st_mtime
+                            ctime = fp.stat().st_ctime
+                            # 최근 생성/수정 시간 조건 매칭
+                            if (start_limit <= mtime <= result.finished_at + 2) or (start_limit <= ctime <= result.finished_at + 2):
+                                files_to_send.append(fp)
+                        except Exception:
+                            pass
+                            
+    # 파일 전송 실행
+    for fp in files_to_send:
+        caption = (
+            f"✅ [mdrunner] '{task.name}' 결과물 전송\n"
+            f"- 실행 모델: {result.argv[result.argv.index('--model')+1] if '--model' in result.argv else (task.model or '기본 모델')}\n"
+            f"- 소요 시간: {result.duration_seconds:.1f}초"
+        )
+        telegram.send_document(
+            bot_token=bot_token,
+            chat_id=chat_id,
+            file_path=str(fp),
+            caption=caption
+        )
+
 
 
 def _execute(
@@ -348,7 +403,7 @@ def _execute(
                         # the last ~4 KB so the cost stays bounded for long runs.
                         # After the run finishes we do a full scan below.
                         recent_window = "".join(accumulated_text[-200:])
-                        saved_file = detect_saved_file(recent_window)
+                        saved_file = detect_saved_file(recent_window, defaults.artifact_markers)
                         if deadline is not None and time.time() > deadline:
                             timed_out = True
                             _terminate_process_tree(proc)
@@ -382,7 +437,7 @@ def _execute(
 
     finished = time.time()
     if saved_file is None:
-        saved_file = detect_saved_file("".join(accumulated_text))
+        saved_file = detect_saved_file("".join(accumulated_text), defaults.artifact_markers)
     return RunResult(
         task_id=task.id,
         started_at=started,
