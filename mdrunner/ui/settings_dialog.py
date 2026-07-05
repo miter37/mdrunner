@@ -111,7 +111,9 @@ class SettingsDialog(QDialog):
         row_l.addWidget(self.in_binary, 1)
         row_l.addWidget(btn_detect)
         f1.addRow("Binary", row)
-        self.in_default_model = QLineEdit(gb1)
+        from PySide6.QtWidgets import QComboBox
+        self.in_default_model = QComboBox(gb1)
+        self.in_default_model.setEditable(True)
         f1.addRow("Default model", self.in_default_model)
         self.in_health_cmd = QLineEdit(gb1)
         f1.addRow("Health check cmd", self.in_health_cmd)
@@ -163,8 +165,40 @@ class SettingsDialog(QDialog):
         cfg = self._current_agent_cfg()
         if cfg is None:
             return
+        aid = self._current_agent_id()
         self.in_binary.setText(cfg.binary)
-        self.in_default_model.setText(cfg.default_model or "")
+        
+        self.in_default_model.clear()
+        if cfg.default_model:
+            self.in_default_model.setCurrentText(cfg.default_model)
+        
+        self.in_default_model.setEnabled(False)
+        self.in_default_model.addItem("(loading models...)")
+        self.in_default_model.setCurrentIndex(0)
+        
+        from .workers import ModelFetchWorker
+        self._model_worker = ModelFetchWorker(aid, cfg.binary)
+        
+        def on_models_loaded(models):
+            self.in_default_model.clear()
+            if models:
+                self.in_default_model.addItems(models)
+            if cfg.default_model:
+                self.in_default_model.setCurrentText(cfg.default_model)
+            else:
+                self.in_default_model.setCurrentIndex(-1)
+            self.in_default_model.setEnabled(True)
+
+        def on_models_error(err):
+            self.in_default_model.clear()
+            if cfg.default_model:
+                self.in_default_model.setCurrentText(cfg.default_model)
+            self.in_default_model.setEnabled(True)
+            
+        self._model_worker.models_ready.connect(on_models_loaded)
+        self._model_worker.error.connect(on_models_error)
+        self._model_worker.start()
+
         self.in_health_cmd.setText(" ".join(cfg.health_cmd))
         self.in_bypass_sched.setText(" ".join(cfg.bypass.scheduled))
         self.in_bypass_manual.setText(" ".join(cfg.bypass.manual))
@@ -232,25 +266,41 @@ class SettingsDialog(QDialog):
         if not aid:
             return
         binary = self.in_binary.text().strip()
-        cmd_text = self.in_health_cmd.text().strip()
-        cmd = shlex.split(cmd_text) if cmd_text else [binary, "--version"]
-        r = probe_health(binary, cmd)
-        risk = bypass_risk_level(
-            shlex.split(self.in_bypass_sched.text()) + shlex.split(self.in_bypass_manual.text())
-        )
-        text = []
-        if r.ok:
-            text.append(f"✓ Found: {r.binary_path}")
-            if r.version:
-                text.append(f"  Version: {r.version}")
-        else:
-            text.append(f"✗ Error: {r.error}")
-            if r.stdout:
-                text.append(f"  stdout: {r.stdout[:300]}")
-            if r.stderr:
-                text.append(f"  stderr: {r.stderr[:300]}")
-        text.append(f"  bypass risk: {risk}")
-        self.health_result.setPlainText("\n".join(text))
+        model = self.in_default_model.currentText().strip() or None
+        
+        self.health_result.clear()
+        self.btn_health.setEnabled(False)
+        
+        from .workers import SingleAgentHealthWorker
+        self._health_worker = SingleAgentHealthWorker(aid, binary, model)
+        
+        def on_progress(msg):
+            self.health_result.appendPlainText(msg)
+            
+        def on_finished(result):
+            self.btn_health.setEnabled(True)
+            text = []
+            text.append("\n==================================")
+            if result.ok:
+                text.append("✓ 헬스체크 최종 판정: 정상 (PASS)")
+                if result.version:
+                    text.append(f"  버전: {result.version}")
+            else:
+                text.append("✗ 헬스체크 최종 판정: 실패 (FAIL)")
+                if result.error:
+                    text.append(f"  오류 내용: {result.error}")
+            
+            if result.stdout:
+                text.append(f"\n--- [Stdout Output] ---\n{result.stdout[:500]}")
+            if result.stderr:
+                text.append(f"\n--- [Stderr Output] ---\n{result.stderr[:500]}")
+                
+            self.health_result.appendPlainText("\n".join(text))
+            
+        self._health_worker.progress.connect(on_progress)
+        self._health_worker.finished.connect(on_finished)
+        self._health_worker.start()
+
 
     def _on_add_preset(self) -> None:
         cfg = self._current_agent_cfg()
@@ -335,7 +385,7 @@ class SettingsDialog(QDialog):
         cfg = self._current_agent_cfg()
         if cfg is not None:
             cfg.binary = self.in_binary.text().strip() or cfg.binary
-            cfg.default_model = self.in_default_model.text().strip() or None
+            cfg.default_model = self.in_default_model.currentText().strip() or None
             cfg.health_cmd = shlex.split(self.in_health_cmd.text()) if self.in_health_cmd.text().strip() else [cfg.binary, "--version"]
             cfg.bypass = Bypass(
                 scheduled=shlex.split(self.in_bypass_sched.text()),
