@@ -19,7 +19,14 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Resolve the real path of this script — when called as `mdrunner` (via PATH),
+# $0 is just "mdrunner", not an absolute path, so `dirname` would yield "."
+# instead of the actual script directory. Resolve via readlink/which first.
+SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || true)"
+if [ -z "$SCRIPT_PATH" ] || [ ! -e "$SCRIPT_PATH" ]; then
+    SCRIPT_PATH="$0"
+fi
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 MD_RUNNER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Detect GUI mode: --gui flag or MDRUNNER_GUI=1 env var
@@ -29,7 +36,7 @@ if [ "${1:-}" = "--gui" ] || [ -n "${MDRUNNER_GUI:-}" ]; then
 fi
 
 # Central venv (overridable)
-VENV_PYTHON="${MDRUNNER_PYTHON:-/home/doyounkim/APPs/Python314/venv/bin/python3.14}"
+VENV_PYTHON="${MDRUNNER_PYTHON:-/home/doyoonkim/APPs/Python314/venv/bin/python3.14}"
 
 # GUI mode → always use python (frozen binary is CLI-only)
 if [ "$GUI_MODE" -eq 1 ]; then

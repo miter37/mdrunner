@@ -118,5 +118,5 @@ def send_document(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             res_body = resp.read().decode("utf-8", errors="replace")
             return True, res_body[:300]
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return False, str(exc)

@@ -1,6 +1,4 @@
-import pytest
 from unittest.mock import patch, MagicMock
-from pathlib import Path
 from mdrunner.telegram import send_document
 
 def test_send_document_missing_config():
@@ -63,7 +61,7 @@ def test_send_document_http_error(tmp_path):
     file_path = tmp_path / "test.txt"
     file_path.write_text("dummy", encoding="utf-8")
     
-    with patch("urllib.request.urlopen", side_effect=Exception("HTTP Error 400: Bad Request")) as mock_urlopen:
+    with patch("urllib.request.urlopen", side_effect=Exception("HTTP Error 400: Bad Request")):
         ok, err = send_document(
             bot_token="token123",
             chat_id="chat456",
