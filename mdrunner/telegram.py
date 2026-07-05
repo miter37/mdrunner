@@ -50,3 +50,73 @@ def format_failure(task_name: str, result: dict[str, Any]) -> str:
     if saved:
         parts.append(f"last_save: {saved}")
     return "\n".join(parts)
+
+
+def send_document(
+    *,
+    bot_token: str,
+    chat_id: str,
+    file_path: str,
+    caption: str | None = None,
+    timeout: float = 10.0,
+) -> tuple[bool, str]:
+    """Send a document file via Telegram Bot API.
+
+    Returns (ok, error_or_response). No-ops gracefully if bot_token or chat_id
+    is missing, or if the file does not exist.
+    """
+    import uuid
+    import mimetypes
+    from pathlib import Path
+    import urllib.request
+
+    if not bot_token or not chat_id:
+        return False, "telegram bot_token / chat_id not configured"
+
+    path = Path(file_path)
+    if not path.exists():
+        return False, f"file not found: {file_path}"
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendDocument"
+    boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
+
+    mime_type, _ = mimetypes.guess_type(str(path))
+    mime_type = mime_type or "application/octet-stream"
+
+    parts = []
+    # chat_id
+    parts.append(f"--{boundary}")
+    parts.append('Content-Disposition: form-data; name="chat_id"')
+    parts.append('')
+    parts.append(chat_id)
+
+    # caption
+    if caption:
+        parts.append(f"--{boundary}")
+        parts.append('Content-Disposition: form-data; name="caption"')
+        parts.append('')
+        parts.append(caption)
+
+    # document file
+    parts.append(f"--{boundary}")
+    parts.append(f'Content-Disposition: form-data; name="document"; filename="{path.name}"')
+    parts.append(f'Content-Type: {mime_type}')
+    parts.append('')
+
+    header_bytes = "\r\n".join(parts).encode("utf-8") + b"\r\n"
+    with path.open("rb") as f:
+        file_bytes = f.read()
+    footer_bytes = f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+    body = header_bytes + file_bytes + footer_bytes
+
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    req.add_header("Content-Length", str(len(body)))
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            res_body = resp.read().decode("utf-8", errors="replace")
+            return True, res_body[:300]
+    except Exception as exc:
+        return False, str(exc)
