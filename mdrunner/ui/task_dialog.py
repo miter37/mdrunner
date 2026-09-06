@@ -24,8 +24,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QScrollArea,
     QSpinBox,
+    QTabWidget,
     QTimeEdit,
     QVBoxLayout,
     QWidget,
@@ -92,8 +92,8 @@ class TaskDialog(QDialog):
         self.settings = settings
         self.task_id: str = task.id if task else self._suggest_id()
         self.setWindowTitle("Edit task" if task else "Add task")
-        self.resize(660, 660)
-        self.setMinimumSize(560, 480)
+        self.resize(820, 720)
+        self.setMinimumSize(720, 640)
 
         self._build_ui(task)
         self._connect_signals()
@@ -109,29 +109,36 @@ class TaskDialog(QDialog):
 
     def _build_ui(self, task: Optional[Task]) -> None:
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 16, 16, 12)
-        outer.setSpacing(12)
+        outer.setContentsMargins(16, 14, 16, 12)
+        outer.setSpacing(10)
 
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        content = QWidget()
-        content_lay = QVBoxLayout(content)
-        content_lay.setContentsMargins(0, 0, 6, 0)
-        content_lay.setSpacing(12)
+        tabs = QTabWidget(self)
 
-        # --- Identity ---
-        gb_id = QGroupBox("Identity", self)
-        form = QFormLayout(gb_id)
-        self._style_form(form)
-        self.in_name = QLineEdit(gb_id)
+        def _add_tab(title: str, inner: QWidget, *, fill: bool = False) -> None:
+            page = QWidget()
+            lay = QVBoxLayout(page)
+            lay.setContentsMargins(8, 10, 8, 8)
+            lay.addWidget(inner, 1 if fill else 0)
+            if not fill:
+                lay.addStretch(1)
+            tabs.addTab(page, title)
+
+        # --- Name (always visible, above the tabs) ---
+        name_row = QWidget(self)
+        name_lay = QHBoxLayout(name_row)
+        name_lay.setContentsMargins(2, 0, 2, 0)
+        name_lay.setSpacing(10)
+        name_lbl = QLabel("Task name", name_row)
+        self.in_name = QLineEdit(name_row)
+        self.in_name.setPlaceholderText("A short, recognizable name")
         if task:
             self.in_name.setText(task.name)
-        form.addRow("Name", self.in_name)
-        content_lay.addWidget(gb_id)
+        name_lay.addWidget(name_lbl)
+        name_lay.addWidget(self.in_name, 1)
+        outer.addWidget(name_row)
 
         # --- Agent ---
-        gb_agent = QGroupBox("Agent", self)
+        gb_agent = QWidget()
         fa = QFormLayout(gb_agent)
         self._style_form(fa)
         self.in_agent = QComboBox(gb_agent)
@@ -173,10 +180,10 @@ class TaskDialog(QDialog):
         self.in_timeout.setSuffix(" min")
         self.in_timeout.setValue(task.timeout_minutes if task else 10)
         fa.addRow("Timeout", self.in_timeout)
-        content_lay.addWidget(gb_agent)
+        _add_tab("Agent", gb_agent)
 
         # --- Prompt + working dir ---
-        gb_paths = QGroupBox("Files", self)
+        gb_paths = QWidget()
         fp = QFormLayout(gb_paths)
         self._style_form(fp)
 
@@ -206,7 +213,7 @@ class TaskDialog(QDialog):
             "Type the task instruction here. On save it is written as a "
             "Markdown file into:\n" + str(prompts_dir())
         )
-        self.in_prompt_editor.setMinimumHeight(160)
+        self.in_prompt_editor.setMinimumHeight(200)
         self.lbl_prompt_editor = QLabel("Instruction (md)", gb_paths)
         fp.addRow(self.lbl_prompt_editor, self.in_prompt_editor)
 
@@ -233,10 +240,10 @@ class TaskDialog(QDialog):
         rowc_lay.addWidget(self.in_cwd, 1)
         rowc_lay.addWidget(btn_cwd)
         fp.addRow("Working dir (optional)", rowc)
-        content_lay.addWidget(gb_paths)
+        _add_tab("Files", gb_paths, fill=True)
 
         # --- Schedule ---
-        gb_sched = QGroupBox("Schedule", self)
+        gb_sched = QWidget()
         fs = QFormLayout(gb_sched)
         self._style_form(fs)
         self.in_mode = QComboBox(gb_sched)
@@ -318,10 +325,10 @@ class TaskDialog(QDialog):
         mrr_lay.addStretch(1)
         fs.addRow("Min re-run interval", mrr_row)
 
-        content_lay.addWidget(gb_sched)
+        _add_tab("Schedule", gb_sched)
 
         # --- Quota condition (2x2 AND grid) ---
-        self.gb_quota = QGroupBox("Quota condition", self)
+        self.gb_quota = QWidget()
         fq = QFormLayout(self.gb_quota)
         self._style_form(fq)
         qc = task.quota_condition if task else None
@@ -383,10 +390,10 @@ class TaskDialog(QDialog):
         self.lbl_qc_hint.setWordWrap(True)
         self.lbl_qc_hint.setObjectName("hint")
         fq.addRow("", self.lbl_qc_hint)
-        content_lay.addWidget(self.gb_quota)
+        _add_tab("Quota", self.gb_quota)
 
         # --- 알림 설정 (Telegram Notification) ---
-        gb_notify = QGroupBox("Telegram Notification", self)
+        gb_notify = QWidget()
         fn = QFormLayout(gb_notify)
         self._style_form(fn)
 
@@ -432,10 +439,8 @@ class TaskDialog(QDialog):
             self.in_artifact_ext.setText(".md")
         fn.addRow("Extensions filter", self.in_artifact_ext)
 
-        content_lay.addWidget(gb_notify)
-        content_lay.addStretch(1)
-        scroll.setWidget(content)
-        outer.addWidget(scroll, 1)
+        _add_tab("Notifications", gb_notify)
+        outer.addWidget(tabs, 1)
 
         # --- Preview ---
         gb_prev = QGroupBox("Preview command", self)
