@@ -465,14 +465,118 @@ def _probe_agy(binary: str, timeout: float = 32.0) -> QuotaResult:
     )
 
 
+# --- grok: read the billing snapshot grok writes to its own log ------------
+#
+# Grok Build logs `msg == "billing: fetched credits config"` to
+# $GROK_HOME/logs/unified.jsonl with ctx.config.creditUsagePercent and
+# ctx.config.currentPeriod.{type,end}. That is exactly used% + reset time,
+# no auth/API needed. `/usage` in the TUI triggers a fresh fetch; we send it
+# on a PTY and then re-read the *log* (not the screen), so a layout change
+# can't break us.
+
+
+def _grok_billing_log() -> "os.PathLike | str":
+    home = os.environ.get("GROK_HOME") or os.path.expanduser("~/.grok")
+    return os.path.join(home, "logs", "unified.jsonl")
+
+
+def _parse_iso(s) -> Optional[float]:
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _read_grok_billing() -> Optional[dict]:
+    """Last billing snapshot from unified.jsonl → {ts, config, tier} or None."""
+    path = _grok_billing_log()
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 600_000))
+            tail = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    found = None
+    for line in tail.splitlines():
+        if "billing: fetched credits config" not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        ctx = rec.get("ctx") or {}
+        cfg = ctx.get("config") or {}
+        if "creditUsagePercent" in cfg:
+            found = {"ts": rec.get("ts"), "config": cfg, "tier": ctx.get("subscriptionTier")}
+    return found
+
+
+def _grok_result(entry: dict, *, fresh_after: float) -> QuotaResult:
+    cfg = entry["config"]
+    used = float(cfg.get("creditUsagePercent") or 0.0)
+    period = cfg.get("currentPeriod") or {}
+    label = "weekly" if "WEEKLY" in str(period.get("type", "")) else "period"
+    age = time.time() - (_parse_iso(entry.get("ts")) or 0.0)
+    stale = age > fresh_after
+    note = entry.get("tier") or "SuperGrok"
+    if stale:
+        note += f" · snapshot {int(age // 60)} min old"
+    return QuotaResult(
+        "grok",
+        available=True,
+        confidence="estimated" if stale else "authoritative",
+        plan=entry.get("tier"),
+        windows=[
+            QuotaWindow(
+                label=label,
+                used_percent=round(used, 2),
+                resets_at=_parse_iso(period.get("end")),
+                window_minutes=10080 if label == "weekly" else None,
+            )
+        ],
+        note=note,
+    )
+
+
+def _probe_grok(binary: str, timeout: float = 24.0) -> QuotaResult:
+    FRESH = 300.0  # seconds — snapshot older than this triggers a refresh
+    entry = _read_grok_billing()
+    ts = _parse_iso(entry.get("ts")) if entry else None
+    if ts is None or time.time() - ts > FRESH:
+        # `/usage` on a PTY makes grok re-fetch billing and append to the log.
+        path = _resolve_cli(binary)
+        try:
+            from . import _ptyusage
+
+            if path and _ptyusage.supported():
+                _ptyusage.capture_screen(
+                    [path],
+                    cwd=os.path.expanduser("~"),
+                    steps=[
+                        (("await", r"Navigate|for shortcuts|\bhelp\b|›|▌|esc to", 12.0),
+                         "/usage"),
+                        (0.4, "\r"),
+                    ],
+                    stop_when=None,
+                    total_seconds=min(timeout, 22.0),
+                )
+        except Exception:  # noqa: BLE001
+            pass
+        entry = _read_grok_billing() or entry
+    if not entry:
+        return QuotaResult(
+            "grok", False,
+            error="no billing snapshot in ~/.grok/logs/unified.jsonl (run grok once)",
+        )
+    return _grok_result(entry, fresh_after=FRESH)
+
+
 _DISPATCH = {
     "codex": lambda binary: _probe_codex(binary),
     "claude": lambda binary: _probe_claude(binary),
     "agy": lambda binary: _probe_agy(binary),
-    "grok": lambda binary: _probe_unavailable(
-        "grok",
-        "needs a `grok usage-json` helper reusing its internal billing handler",
-    ),
+    "grok": lambda binary: _probe_grok(binary),
 }
 
 

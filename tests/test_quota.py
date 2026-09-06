@@ -19,12 +19,12 @@ from mdrunner.quota import (
 
 
 @pytest.fixture(autouse=True)
-def _no_real_pty(monkeypatch):
-    """Never spawn a real agent CLI during tests — stub the PTY scraper so
-    claude/agy probes resolve instantly to 'unavailable'."""
+def _no_real_probes(monkeypatch, tmp_path):
+    """Never touch a real agent CLI or a real ~/.grok log during tests."""
     import mdrunner._ptyusage as pty
 
     monkeypatch.setattr(pty, "capture_screen", lambda *a, **k: "")
+    monkeypatch.setenv("GROK_HOME", str(tmp_path / "no-grok"))  # empty -> unavailable
 
 
 def test_window_label():
@@ -50,14 +50,41 @@ def test_seconds_until_reset():
 
 
 def test_unavailable_probes_have_confidence():
-    # grok has no source at all; claude/agy fall back to unavailable when the
-    # PTY scrape yields nothing (stubbed empty by the autouse fixture).
+    # claude/agy fall back to unavailable when the PTY scrape yields nothing;
+    # grok is unavailable when there's no ~/.grok billing log (GROK_HOME stub).
     for agent in ("claude", "grok", "agy"):
         r = probe_quota(agent)
         assert r.agent == agent
         assert r.available is False
         assert r.confidence == "unavailable"
         assert r.error
+
+
+def test_grok_reads_billing_log(monkeypatch, tmp_path):
+    log = tmp_path / "gh" / "logs" / "unified.jsonl"
+    log.parent.mkdir(parents=True)
+    fresh = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    log.write_text(
+        '{"ts":"2026-01-01T00:00:00Z","msg":"other"}\n'
+        '{"ts":"' + fresh + '","msg":"billing: fetched credits config","ctx":{'
+        '"config":{"creditUsagePercent":64.2,"currentPeriod":{'
+        '"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-09-01T03:00:00Z",'
+        '"end":"2099-09-08T03:00:00Z"}},"subscriptionTier":"SuperGrok Heavy"}}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GROK_HOME", str(tmp_path / "gh"))
+    r = quota._probe_grok("grok")
+    assert r.available and r.confidence == "authoritative"
+    assert r.plan == "SuperGrok Heavy"
+    w = r.windows[0]
+    assert w.label == "weekly" and w.used_percent == 64.2
+    assert w.resets_at and w.resets_at > time.time()
+
+
+def test_grok_missing_log_is_unavailable(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_HOME", str(tmp_path / "nope"))
+    r = quota._probe_grok("grok")
+    assert not r.available and "billing snapshot" in r.error
 
 
 def test_claude_agy_parsers_on_sample_text():

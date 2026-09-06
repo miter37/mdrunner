@@ -273,7 +273,7 @@ There is no universal source, so each vendor has its own token-free adapter
 | `codex` | `codex app-server` → `account/rateLimits/read` | ✅ authoritative |
 | `claude` | PTY-scrape the interactive `/usage` screen (session + week % + reset) | ✅ estimated |
 | `agy` | PTY-scrape `/usage` (GEMINI MODELS group: weekly + 5-hour) | ✅ estimated |
-| `grok` | needs a `grok usage-json` helper (its `/usage` billing handler) | ⏳ stub |
+| `grok` | read `~/.grok/logs/unified.jsonl` billing snapshot; `/usage` on a PTY to refresh | ✅ authoritative |
 
 The PTY scrapers spawn the real CLI for ~30 s and read its `/usage` panel
 (an account read — no model tokens). They are best-effort: a screen-format
