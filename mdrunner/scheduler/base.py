@@ -9,6 +9,7 @@ from typing import Protocol, runtime_checkable
 
 from ..config import Task
 from .linux import LinuxScheduler
+from .macos import MacScheduler
 from .windows import WindowsScheduler
 
 
@@ -26,6 +27,8 @@ def current() -> SchedulerAdapter:
     """Return the scheduler adapter for the current OS."""
     if sys.platform.startswith("linux"):
         return LinuxScheduler()
+    if sys.platform == "darwin":
+        return MacScheduler()
     if sys.platform == "win32":
         return WindowsScheduler()
     raise RuntimeError(f"unsupported platform: {sys.platform}")

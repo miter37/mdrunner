@@ -337,12 +337,26 @@ GUI smoke (instantiates MainWindow off-screen and exercises key paths).
 
 ## Cross-platform notes
 
+| Area | Linux | macOS | Windows |
+|------|:-----:|:-----:|:-------:|
+| CLI + PySide6 GUI | ✅ | ✅ | ✅ |
+| Task scheduling | systemd user timer | launchd user agent | Task Scheduler (`schtasks`) |
+| Quota poll timer | ✅ | ✅ | — |
+| quota: codex / grok | ✅ | ✅ | ✅ |
+| quota: claude / agy (PTY `/usage`) | ✅ | ✅ | — (`pty` is Unix-only) |
+| Telegram, inline prompts, model list | ✅ | ✅ | ✅ |
+| GUI launcher | `./run_gui.sh` | `./run_gui.sh` | `run_gui.bat` |
+
 - **Linux** — `~/.config/systemd/user/`. Requires `systemctl` on PATH.
-  Tasks run as the logged-in user. `loginctl enable-linger <user>` lets
-  them run even when no interactive session is active.
-- **Windows** — Task Scheduler via `schtasks.exe`. The mdrunner binary
-  must be at a stable absolute path. Set `RUNCHER_EXECUTABLE` to control
-  which path the OS scheduler invokes (set by packaged builds).
+  `loginctl enable-linger <user>` lets tasks run with no interactive session.
+- **macOS** — `~/Library/LaunchAgents/com.mdrunner.<id>.plist`, loaded with
+  `launchctl`. The plist pins a `PATH` (Homebrew + nvm + `~/.local/bin`) so
+  scheduled runs find the agent CLIs. launchd uses local time and has no
+  per-job timezone, so a task's `schedule.timezone` is advisory only.
+- **Windows** — Task Scheduler via `schtasks.exe`. Set `RUNCHER_EXECUTABLE`
+  to control the invoked path (packaged builds do this). The interactive
+  claude/agy quota scrape needs a Unix pty and is disabled here; codex
+  (JSON-RPC) and grok (billing log) still work.
 
 ## License
 

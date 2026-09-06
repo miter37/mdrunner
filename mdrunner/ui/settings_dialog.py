@@ -505,16 +505,15 @@ class SettingsDialog(QDialog):
         return w
 
     def _apply_quota_timer(self, qp) -> None:
-        """Install / remove the mdrunner-quota-poll systemd user timer."""
-        import sys
-
-        if not sys.platform.startswith("linux"):
-            return
+        """Install / remove the periodic quota-poll OS timer (systemd on
+        Linux, launchd on macOS; unsupported elsewhere)."""
         try:
             from ..cli import _mdrunner_executable_for_scheduler
-            from ..scheduler.linux import LinuxScheduler
+            from ..scheduler.base import current
 
-            sched = LinuxScheduler()
+            sched = current()
+            if not hasattr(sched, "install_quota_poll"):
+                return
             if qp.enabled:
                 sched.install_quota_poll(
                     qp.interval_minutes, _mdrunner_executable_for_scheduler()
@@ -524,7 +523,7 @@ class SettingsDialog(QDialog):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(
                 self, "Quota timer",
-                f"Saved the setting, but the systemd timer step failed:\n\n{exc}",
+                f"Saved the setting, but the OS timer step failed:\n\n{exc}",
             )
 
     # =================================================== Save

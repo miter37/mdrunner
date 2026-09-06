@@ -236,14 +236,12 @@ def cmd_quota(args: argparse.Namespace) -> int:
 
 
 def cmd_quota_schedule(args: argparse.Namespace) -> int:
-    import sys as _sys
+    from .scheduler.base import current
 
-    if not _sys.platform.startswith("linux"):
-        print("quota poll timer is only supported on Linux (systemd)", file=sys.stderr)
+    sched = current()
+    if not hasattr(sched, "install_quota_poll"):
+        print("quota poll timer is not supported on this platform", file=sys.stderr)
         return 2
-    from .scheduler.linux import LinuxScheduler
-
-    sched = LinuxScheduler()
     settings = load_settings(settings_file())
 
     if args.action == "status":
