@@ -348,7 +348,8 @@ def _parse_claude_usage(text: str) -> list[QuotaWindow]:
 
 
 def _probe_claude(binary: str, timeout: float = 28.0) -> QuotaResult:
-    if _resolve_cli(binary) is None:
+    path = _resolve_cli(binary)
+    if path is None:
         return QuotaResult("claude", False, error=f"binary {binary!r} not on PATH")
     from . import _ptyusage
 
@@ -358,7 +359,7 @@ def _probe_claude(binary: str, timeout: float = 28.0) -> QuotaResult:
     # default choice is "No, exit", so arrow-down to "Yes, I trust" + Enter
     # first. If there is no prompt those keys land harmlessly in the input.
     text = _ptyusage.capture_screen(
-        [binary],
+        [path],
         cwd=os.path.expanduser("~"),
         script=[
             (3.5, "\x1b[B"), (4.0, "\r"),
@@ -417,14 +418,15 @@ def _parse_agy_usage(text: str, group: str = "GEMINI MODELS") -> list[QuotaWindo
 
 
 def _probe_agy(binary: str, timeout: float = 32.0) -> QuotaResult:
-    if _resolve_cli(binary) is None:
+    path = _resolve_cli(binary)
+    if path is None:
         return QuotaResult("agy", False, error=f"binary {binary!r} not on PATH")
     from . import _ptyusage
 
     if not _ptyusage.supported():
         return QuotaResult("agy", False, error="PTY scrape unsupported on this platform")
     text = _ptyusage.capture_screen(
-        [binary],
+        [path],
         cwd=os.path.expanduser("~"),
         script=[(9.0, "/usage"), (10.0, "\r"), (12.0, "\r"), (14.0, "\r")],
         total_seconds=timeout,
