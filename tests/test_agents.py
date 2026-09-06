@@ -183,3 +183,38 @@ def test_hermes_default_bypass(tmp_path: Path) -> None:
     res = adapter.build_argv(md, model=None, working_dir=None,
                              extra_args=(), bypass_flags=())
     assert "--yolo" in res.argv
+
+
+def test_grok_basic(tmp_path: Path) -> None:
+    md = tmp_path / "task.md"
+    md.write_text("ignored — file path is the prompt", encoding="utf-8")
+    adapter = get_adapter("grok")
+    res = adapter.build_argv(
+        md,
+        model="grok-4.6",
+        working_dir=Path("/tmp"),
+        extra_args=("--reasoning-effort", "high"),
+        bypass_flags=("--permission-mode", "bypassPermissions"),
+    )
+    assert res.argv[0] == "grok"
+    assert "--prompt-file" in res.argv
+    # prompt-file points at the md path, not its text
+    assert res.argv[res.argv.index("--prompt-file") + 1] == str(md)
+    assert "--permission-mode" in res.argv
+    assert "bypassPermissions" in res.argv
+    assert res.argv[res.argv.index("--model") + 1] == "grok-4.6"
+    assert "--cwd" in res.argv and "/tmp" in res.argv
+    assert "--reasoning-effort" in res.argv
+
+
+def test_grok_default_bypass(tmp_path: Path) -> None:
+    """Empty bypass → adapter injects bypassPermissions (headless grok
+    otherwise stalls on the first permission prompt)."""
+    md = tmp_path / "task.md"
+    md.write_text("body", encoding="utf-8")
+    adapter = get_adapter("grok")
+    res = adapter.build_argv(md, model=None, working_dir=None,
+                             extra_args=(), bypass_flags=())
+    assert res.argv == [
+        "grok", "--prompt-file", str(md), "--permission-mode", "bypassPermissions",
+    ]

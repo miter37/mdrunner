@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -16,15 +17,19 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
+
+from .theme import mono_font, style_form
 
 from ..config import (
     OnFailure,
@@ -33,7 +38,8 @@ from ..config import (
     Task,
     save_tasks,
 )
-from ..utils.paths import tasks_file
+from ..prompts import is_managed_prompt, save_inline_prompt
+from ..utils.paths import prompts_dir, tasks_file
 
 
 WEEKDAYS = [
@@ -71,7 +77,8 @@ class TaskDialog(QDialog):
         self.settings = settings
         self.task_id: str = task.id if task else self._suggest_id()
         self.setWindowTitle("Edit task" if task else "Add task")
-        self.resize(720, 640)
+        self.resize(660, 660)
+        self.setMinimumSize(560, 480)
 
         self._build_ui(task)
         self._connect_signals()
@@ -83,21 +90,35 @@ class TaskDialog(QDialog):
     def _suggest_id(self) -> str:
         return f"task_{_dt.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
+    _style_form = staticmethod(style_form)
+
     def _build_ui(self, task: Optional[Task]) -> None:
         outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 16, 16, 12)
+        outer.setSpacing(12)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        content = QWidget()
+        content_lay = QVBoxLayout(content)
+        content_lay.setContentsMargins(0, 0, 6, 0)
+        content_lay.setSpacing(12)
 
         # --- Identity ---
         gb_id = QGroupBox("Identity", self)
         form = QFormLayout(gb_id)
+        self._style_form(form)
         self.in_name = QLineEdit(gb_id)
         if task:
             self.in_name.setText(task.name)
         form.addRow("Name", self.in_name)
-        outer.addWidget(gb_id)
+        content_lay.addWidget(gb_id)
 
         # --- Agent ---
         gb_agent = QGroupBox("Agent", self)
         fa = QFormLayout(gb_agent)
+        self._style_form(fa)
         self.in_agent = QComboBox(gb_agent)
         for agent_id in sorted(self.settings.agents.keys()):
             self.in_agent.addItem(agent_id)
@@ -107,13 +128,14 @@ class TaskDialog(QDialog):
                 self.in_agent.setCurrentIndex(idx)
         fa.addRow("Agent", self.in_agent)
 
-        self.in_model = QLineEdit(gb_agent)
-        self.in_model.setPlaceholderText(
-            "e.g. minimax-coding-plan/MiniMax-M3 (blank = use default)"
-        )
+        self.in_model = QComboBox(gb_agent)
+        self.in_model.setEditable(True)
+        self.in_model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.in_model.lineEdit().setPlaceholderText("(blank = agent's default model)")
         if task and task.model:
-            self.in_model.setText(task.model)
+            self.in_model.setCurrentText(task.model)
         fa.addRow("Model", self.in_model)
+        self._model_worker = None
 
         self.in_preset = QComboBox(gb_agent)
         self.in_preset.addItem("(custom / none)", None)
@@ -136,22 +158,53 @@ class TaskDialog(QDialog):
         self.in_timeout.setSuffix(" min")
         self.in_timeout.setValue(task.timeout_minutes if task else 10)
         fa.addRow("Timeout", self.in_timeout)
-        outer.addWidget(gb_agent)
+        content_lay.addWidget(gb_agent)
 
         # --- Prompt + working dir ---
         gb_paths = QGroupBox("Files", self)
         fp = QFormLayout(gb_paths)
+        self._style_form(fp)
+
+        # Prompt source: point at an existing md file, or type the instruction
+        # right here and let mdrunner save it as an md file in its own folder.
+        self.in_prompt_source = QComboBox(gb_paths)
+        self.in_prompt_source.addItem("Existing file", "file")
+        self.in_prompt_source.addItem("Write inline (saved as .md)", "inline")
+        fp.addRow("Prompt source", self.in_prompt_source)
+
         self.in_prompt = QLineEdit(gb_paths)
         if task:
             self.in_prompt.setText(task.prompt_file)
-        btn_prompt = QPushButton("Browse…", gb_paths)
-        btn_prompt.clicked.connect(self._pick_prompt)
-        rowp = QWidget(gb_paths)
-        rowp_lay = QHBoxLayout(rowp)
+        self.btn_prompt = QPushButton("Browse…", gb_paths)
+        self.btn_prompt.clicked.connect(self._pick_prompt)
+        self.row_prompt_file = QWidget(gb_paths)
+        rowp_lay = QHBoxLayout(self.row_prompt_file)
         rowp_lay.setContentsMargins(0, 0, 0, 0)
+        rowp_lay.setSpacing(6)
         rowp_lay.addWidget(self.in_prompt, 1)
-        rowp_lay.addWidget(btn_prompt)
-        fp.addRow("Prompt file", rowp)
+        rowp_lay.addWidget(self.btn_prompt)
+        self.lbl_prompt_file = QLabel("Prompt file", gb_paths)
+        fp.addRow(self.lbl_prompt_file, self.row_prompt_file)
+
+        self.in_prompt_editor = QPlainTextEdit(gb_paths)
+        self.in_prompt_editor.setPlaceholderText(
+            "Type the task instruction here. On save it is written as a "
+            "Markdown file into:\n" + str(prompts_dir())
+        )
+        self.in_prompt_editor.setMinimumHeight(160)
+        self.lbl_prompt_editor = QLabel("Instruction (md)", gb_paths)
+        fp.addRow(self.lbl_prompt_editor, self.in_prompt_editor)
+
+        # When editing a task whose prompt file is one mdrunner manages,
+        # default to inline mode and load the current text for editing.
+        if task and is_managed_prompt(task.prompt_file):
+            self.in_prompt_source.setCurrentIndex(self.in_prompt_source.findData("inline"))
+            try:
+                self.in_prompt_editor.setPlainText(
+                    Path(task.prompt_file).expanduser().read_text(encoding="utf-8")
+                )
+            except OSError:
+                pass
 
         self.in_cwd = QLineEdit(gb_paths)
         if task and task.working_dir:
@@ -161,14 +214,16 @@ class TaskDialog(QDialog):
         rowc = QWidget(gb_paths)
         rowc_lay = QHBoxLayout(rowc)
         rowc_lay.setContentsMargins(0, 0, 0, 0)
+        rowc_lay.setSpacing(6)
         rowc_lay.addWidget(self.in_cwd, 1)
         rowc_lay.addWidget(btn_cwd)
         fp.addRow("Working dir (optional)", rowc)
-        outer.addWidget(gb_paths)
+        content_lay.addWidget(gb_paths)
 
         # --- Schedule ---
         gb_sched = QGroupBox("Schedule", self)
         fs = QFormLayout(gb_sched)
+        self._style_form(fs)
         self.in_mode = QComboBox(gb_sched)
         for m in ("once", "daily", "weekly", "interval"):
             self.in_mode.addItem(m)
@@ -225,11 +280,12 @@ class TaskDialog(QDialog):
         self.in_interval.setValue(task.schedule.interval_minutes if task else 60)
         fs.addRow("Interval (interval mode)", self.in_interval)
 
-        outer.addWidget(gb_sched)
+        content_lay.addWidget(gb_sched)
 
         # --- 알림 설정 (Telegram Notification) ---
         gb_notify = QGroupBox("Telegram Notification", self)
         fn = QFormLayout(gb_notify)
+        self._style_form(fn)
 
         self.in_notify_fail = QCheckBox("실패 시 텔레그램 알림 전송 (On Failure)", gb_notify)
         if task:
@@ -260,6 +316,7 @@ class TaskDialog(QDialog):
         row_art = QWidget(gb_notify)
         row_art_lay = QHBoxLayout(row_art)
         row_art_lay.setContentsMargins(0, 0, 0, 0)
+        row_art_lay.setSpacing(6)
         row_art_lay.addWidget(self.in_artifact_dir, 1)
         row_art_lay.addWidget(btn_art_dir)
         fn.addRow("Result Directory", row_art)
@@ -272,16 +329,20 @@ class TaskDialog(QDialog):
             self.in_artifact_ext.setText(".md")
         fn.addRow("Extensions filter", self.in_artifact_ext)
 
-        outer.addWidget(gb_notify)
+        content_lay.addWidget(gb_notify)
+        content_lay.addStretch(1)
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
 
         # --- Preview ---
         gb_prev = QGroupBox("Preview command", self)
         fp2 = QVBoxLayout(gb_prev)
         self.preview_text = QPlainTextEdit(gb_prev)
         self.preview_text.setReadOnly(True)
-        self.preview_text.setMaximumHeight(120)
+        self.preview_text.setFont(mono_font(9))
+        self.preview_text.setFixedHeight(96)
         fp2.addWidget(self.preview_text)
-        outer.addWidget(gb_prev, 1)
+        outer.addWidget(gb_prev)
 
         # --- Buttons ---
         buttons = QDialogButtonBox(
@@ -299,23 +360,38 @@ class TaskDialog(QDialog):
 
     def _connect_signals(self) -> None:
         self.in_agent.currentTextChanged.connect(self._refresh_agent_dependent_fields)
-        self.in_model.textChanged.connect(self._refresh_preview)
+        self.in_model.currentTextChanged.connect(self._refresh_preview)
         self.in_extra.textChanged.connect(self._refresh_preview)
+        self.in_prompt_source.currentIndexChanged.connect(self._toggle_prompt_source)
         self.in_prompt.textChanged.connect(self._refresh_preview)
+        self.in_prompt_editor.textChanged.connect(self._refresh_preview)
         self.in_cwd.textChanged.connect(self._refresh_preview)
         self.in_timeout.valueChanged.connect(self._refresh_preview)
         self.in_preset.currentIndexChanged.connect(self._on_preset_changed)
-        self.in_mode.currentTextChanged.connect(self._refresh_preview)
+        self.in_mode.currentTextChanged.connect(self._on_mode_changed)
         self.in_time.timeChanged.connect(self._refresh_preview)
         self.in_tz.currentTextChanged.connect(self._refresh_preview)
         self.in_interval.valueChanged.connect(self._refresh_preview)
 
         self.in_notify_artifact.toggled.connect(self._toggle_artifact_fields)
         self._toggle_artifact_fields(self.in_notify_artifact.isChecked())
+        self._toggle_prompt_source()
+        self._on_mode_changed()
 
     def _toggle_artifact_fields(self, checked: bool) -> None:
         self.in_artifact_dir.setEnabled(checked)
         self.in_artifact_ext.setEnabled(checked)
+
+    def _prompt_source(self) -> str:
+        return self.in_prompt_source.currentData() or "file"
+
+    def _toggle_prompt_source(self) -> None:
+        inline = self._prompt_source() == "inline"
+        self.lbl_prompt_file.setVisible(not inline)
+        self.row_prompt_file.setVisible(not inline)
+        self.lbl_prompt_editor.setVisible(inline)
+        self.in_prompt_editor.setVisible(inline)
+        self._refresh_preview()
 
     # ---------------------------------------------------------- event handlers
 
@@ -329,11 +405,63 @@ class TaskDialog(QDialog):
         if cfg:
             for p in cfg.presets:
                 self.in_preset.addItem(p.name, list(p.args))
-            # Set default model placeholder
-            if cfg.default_model and not self.in_model.text():
-                self.in_model.setText(cfg.default_model)
         self.in_preset.blockSignals(False)
+        self._populate_models(agent_id)
         self._refresh_preview()
+
+    def _populate_models(self, agent_id: str) -> None:
+        """Fill the Model dropdown from the agent's known models (async)."""
+        cfg = self.settings.agents.get(agent_id)
+        cur = self.in_model.currentText().strip()
+        seed = [cfg.default_model] if (cfg and cfg.default_model) else []
+        self._set_model_items(seed, keep=cur)
+        if getattr(self, "_model_worker", None) is not None:
+            return
+        binp = None
+        if cfg:
+            from ..agents import resolve_binary
+
+            binp = resolve_binary(cfg.binary)
+        from .workers import ModelFetchWorker
+
+        self._model_worker = ModelFetchWorker(agent_id, binp)
+        self._model_worker.models_ready.connect(self._on_models_ready)
+        self._model_worker.error.connect(lambda _e: setattr(self, "_model_worker", None))
+        self._model_worker.start()
+
+    def _on_models_ready(self, models: list) -> None:
+        self._model_worker = None
+        cfg = self.settings.agents.get(self.in_agent.currentText())
+        seed = [cfg.default_model] if (cfg and cfg.default_model) else []
+        self._set_model_items(seed + list(models), keep=self.in_model.currentText().strip())
+
+    def _set_model_items(self, items: list, *, keep: str) -> None:
+        uniq = list(dict.fromkeys(m for m in items if m))
+        self.in_model.blockSignals(True)
+        self.in_model.clear()
+        self.in_model.addItems(uniq)
+        self.in_model.setCurrentText(keep)
+        self.in_model.blockSignals(False)
+
+    def _on_mode_changed(self, _mode: str = "") -> None:
+        weekly = self.in_mode.currentText() == "weekly"
+        interval = self.in_mode.currentText() == "interval"
+        for cb in self.day_checks.values():
+            cb.setEnabled(weekly)
+        self.in_interval.setEnabled(interval)
+        self.in_time.setEnabled(not interval)
+        self._refresh_preview()
+
+    def done(self, r: int) -> None:  # noqa: D401 — stop the model worker cleanly
+        w = getattr(self, "_model_worker", None)
+        if w is not None:
+            try:
+                w.quit()
+                w.wait(1000)
+            except RuntimeError:
+                pass
+            self._model_worker = None
+        super().done(r)
 
     def _on_preset_changed(self, _idx: int) -> None:
         data = self.in_preset.currentData()
@@ -366,9 +494,7 @@ class TaskDialog(QDialog):
         self.in_timeout.setValue(defaults.timeout_minutes)
         self.in_tz.setCurrentText("Asia/Seoul")
         self.in_time.setTime(QTime(7, 0))
-        for code, _ in WEEKDAYS:
-            self.in_preset.currentTextChanged.disconnect()  # type: ignore[attr-defined]
-        self.in_model.clear()
+        self.in_model.setCurrentText("")
         self.in_extra.clear()
         for code, cb in self.day_checks.items():
             cb.setChecked(code in ("mon", "tue", "wed", "thu", "fri"))
@@ -379,7 +505,11 @@ class TaskDialog(QDialog):
         self._refresh_preview()
 
     def _refresh_preview(self) -> None:
-        if not self.in_prompt.text().strip():
+        if self._prompt_source() == "inline":
+            if not self.in_prompt_editor.toPlainText().strip():
+                self.preview_text.setPlainText("(write the instruction to see preview)")
+                return
+        elif not self.in_prompt.text().strip():
             self.preview_text.setPlainText("(set prompt file to see preview)")
             return
         try:
@@ -399,33 +529,74 @@ class TaskDialog(QDialog):
             return {"argv_quoted": [f"(no settings for {agent_id!r})"]}
         adapter = get_adapter(agent_id)
         bypass = cfg.bypass.scheduled
-        model = self.in_model.text().strip() or cfg.default_model
+        model = self.in_model.currentText().strip() or cfg.default_model
         cwd = Path(self.in_cwd.text()).expanduser() if self.in_cwd.text().strip() else None
         extra = shlex_split(self.in_extra.text())
-        prompt_file = Path(self.in_prompt.text()).expanduser()
-        if not prompt_file.exists():
-            return {"argv_quoted": [f"(prompt file not found: {prompt_file})"]}
-        res = adapter.build_argv(
-            prompt_file,
-            model=model,
-            working_dir=cwd,
-            extra_args=extra,
-            bypass_flags=bypass,
-        )
-        return {"argv_quoted": [shlex_quote(a) for a in res.argv]}
+
+        tmp_prompt: Optional[Path] = None
+        if self._prompt_source() == "inline":
+            import tempfile
+
+            fd, tmp_name = tempfile.mkstemp(suffix=".md", text=True)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(self.in_prompt_editor.toPlainText())
+            tmp_prompt = Path(tmp_name)
+            prompt_file = tmp_prompt
+        else:
+            prompt_file = Path(self.in_prompt.text()).expanduser()
+
+        try:
+            if not prompt_file.exists():
+                return {"argv_quoted": [f"(prompt file not found: {prompt_file})"]}
+            res = adapter.build_argv(
+                prompt_file,
+                model=model,
+                working_dir=cwd,
+                extra_args=extra,
+                bypass_flags=bypass,
+            )
+            return {"argv_quoted": [shlex_quote(a) for a in res.argv]}
+        finally:
+            if tmp_prompt is not None:
+                try:
+                    tmp_prompt.unlink()
+                except OSError:
+                    pass
 
     def _on_accept(self) -> None:
         name = self.in_name.text().strip()
-        prompt_file = self.in_prompt.text().strip()
         if not name:
             QMessageBox.warning(self, "Missing name", "Task name is required.")
             return
-        if not prompt_file:
-            QMessageBox.warning(self, "Missing prompt file", "Prompt file is required.")
-            return
-        if not Path(prompt_file).expanduser().exists():
-            QMessageBox.warning(self, "Prompt file missing", f"File does not exist:\n{prompt_file}")
-            return
+
+        if self._prompt_source() == "inline":
+            body = self.in_prompt_editor.toPlainText().strip()
+            if not body:
+                QMessageBox.warning(
+                    self,
+                    "Missing instruction",
+                    "Write the task instruction, or switch Prompt source to "
+                    "“Existing file”.",
+                )
+                return
+            existing = self.in_prompt.text().strip() or None
+            try:
+                saved = save_inline_prompt(body, name=name, existing_path=existing)
+            except OSError as exc:
+                QMessageBox.critical(self, "Save failed", f"Could not write prompt file:\n{exc}")
+                return
+            self.in_prompt.setText(str(saved))
+            prompt_file = str(saved)
+        else:
+            prompt_file = self.in_prompt.text().strip()
+            if not prompt_file:
+                QMessageBox.warning(self, "Missing prompt file", "Prompt file is required.")
+                return
+            if not Path(prompt_file).expanduser().exists():
+                QMessageBox.warning(
+                    self, "Prompt file missing", f"File does not exist:\n{prompt_file}"
+                )
+                return
         # Persist
         from ..cli import load_tasks
 
@@ -440,7 +611,7 @@ class TaskDialog(QDialog):
             name=name,
             enabled=True,
             agent=self.in_agent.currentText(),
-            model=self.in_model.text().strip() or None,
+            model=self.in_model.currentText().strip() or None,
             prompt_file=prompt_file,
             working_dir=self.in_cwd.text().strip() or None,
             schedule=self._build_schedule(),

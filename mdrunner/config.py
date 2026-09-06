@@ -177,9 +177,21 @@ class Defaults:
 
 
 @dataclass
+class QuotaPoll:
+    """Settings for the periodic agent-quota poller (systemd user timer)."""
+
+    enabled: bool = False
+    interval_minutes: int = 180
+    agents: list[str] = field(
+        default_factory=lambda: ["claude", "codex", "agy", "grok"]
+    )
+
+
+@dataclass
 class Settings:
     agents: dict[str, AgentConfig] = field(default_factory=dict)
     defaults: Defaults = field(default_factory=Defaults)
+    quota_poll: QuotaPoll = field(default_factory=QuotaPoll)
 
 
 def agent_from_dict(agent_id: str, data: dict[str, Any]) -> AgentConfig:
@@ -230,7 +242,13 @@ def settings_from_dict(data: dict[str, Any]) -> Settings:
         artifact_markers=[str(x) for x in defaults_data.get("artifact_markers", ["Saved:", "저장 완료:"])],
         artifact_time_window_seconds=int(defaults_data.get("artifact_time_window_seconds", 30)),
     )
-    return Settings(agents=agents, defaults=defaults)
+    qp_data = data.get("quota_poll") or {}
+    quota_poll = QuotaPoll(
+        enabled=bool(qp_data.get("enabled", False)),
+        interval_minutes=int(qp_data.get("interval_minutes", 180)),
+        agents=[str(x) for x in qp_data.get("agents", ["claude", "codex", "agy", "grok"])],
+    )
+    return Settings(agents=agents, defaults=defaults, quota_poll=quota_poll)
 
 
 def settings_to_dict(settings: Settings) -> dict[str, Any]:
@@ -243,6 +261,11 @@ def settings_to_dict(settings: Settings) -> dict[str, Any]:
             "timeout_minutes": settings.defaults.timeout_minutes,
             "artifact_markers": settings.defaults.artifact_markers,
             "artifact_time_window_seconds": settings.defaults.artifact_time_window_seconds,
+        },
+        "quota_poll": {
+            "enabled": settings.quota_poll.enabled,
+            "interval_minutes": settings.quota_poll.interval_minutes,
+            "agents": settings.quota_poll.agents,
         },
     }
 

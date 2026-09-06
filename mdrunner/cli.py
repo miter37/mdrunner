@@ -199,6 +199,85 @@ def cmd_health(args: argparse.Namespace) -> int:
     return 1 if bad else 0
 
 
+def cmd_quota(args: argparse.Namespace) -> int:
+    from .quota import fmt_reset, quota_summary, save_snapshot
+
+    settings = load_settings(settings_file())
+    agents = args.agents.split(",") if args.agents else settings.quota_poll.agents
+    results = quota_summary([a.strip() for a in agents if a.strip()])
+
+    if args.write:
+        p = save_snapshot(results)
+        print(f"wrote {p}", file=sys.stderr)
+
+    if args.json:
+        print(json.dumps({r.agent: r.to_dict() for r in results}, indent=2, ensure_ascii=False))
+        return 0
+
+    print(f"{'AGENT':<8} {'PLAN':<8} {'WINDOW':<9} {'USED':>6} {'RESETS IN':>10}")
+    print("-" * 48)
+    for r in results:
+        if not r.available:
+            print(f"{r.agent:<8} {'—':<8} {'—':<9} {'—':>6} {'—':>10}   ({r.error})")
+            continue
+        if not r.windows:
+            print(f"{r.agent:<8} {(r.plan or '—'):<8} (no windows reported)")
+        for i, w in enumerate(r.windows):
+            agent_c = r.agent if i == 0 else ""
+            plan_c = (r.plan or "—") if i == 0 else ""
+            used = f"{w.used_percent:.0f}%" if w.used_percent is not None else "—"
+            print(
+                f"{agent_c:<8} {plan_c:<8} {w.label:<9} {used:>6} "
+                f"{fmt_reset(w.seconds_until_reset):>10}"
+            )
+        if r.note:
+            print(f"{'':<8} {'':<8} · {r.note}")
+    return 0
+
+
+def cmd_quota_schedule(args: argparse.Namespace) -> int:
+    import sys as _sys
+
+    if not _sys.platform.startswith("linux"):
+        print("quota poll timer is only supported on Linux (systemd)", file=sys.stderr)
+        return 2
+    from .scheduler.linux import LinuxScheduler
+
+    sched = LinuxScheduler()
+    settings = load_settings(settings_file())
+
+    if args.action == "status":
+        if not sched.quota_poll_installed():
+            print("quota poll: not installed")
+            return 1
+        nxt = sched.quota_poll_next_run()
+        interval = sched.quota_poll_interval_minutes() or settings.quota_poll.interval_minutes
+        print("quota poll: installed")
+        print(f"  interval : {interval} min")
+        if nxt:
+            print(f"  next run : {nxt.isoformat(sep=' ', timespec='seconds')}")
+        return 0
+
+    if args.action == "uninstall":
+        sched.uninstall_quota_poll()
+        print("quota poll: uninstalled")
+        return 0
+
+    # install
+    interval = args.interval or settings.quota_poll.interval_minutes
+    executable = _mdrunner_executable_for_scheduler()
+    try:
+        sched.install_quota_poll(interval, executable)
+    except Exception as exc:  # noqa: BLE001
+        print(f"install failed: {exc}", file=sys.stderr)
+        return 2
+    print(f"quota poll: installed (every {interval} min, exec={executable})")
+    nxt = sched.quota_poll_next_run()
+    if nxt:
+        print(f"  next run: {nxt.isoformat(sep=' ', timespec='seconds')}")
+    return 0
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     settings_p = settings_file()
     tasks_p = tasks_file()
@@ -206,7 +285,23 @@ def cmd_init(args: argparse.Namespace) -> int:
         save_settings(settings_p, settings_from_dict(default_settings()))
         print(f"wrote {settings_p}")
     else:
-        print(f"keep:  {settings_p} (already exists)")
+        # Top up agents shipped since this config was created (e.g. a new
+        # adapter added in an update) without touching existing entries.
+        import yaml
+
+        from .config import load_yaml
+
+        raw = load_yaml(settings_p)
+        raw.setdefault("agents", {})
+        added = [a for a in default_settings()["agents"] if a not in raw["agents"]]
+        if added:
+            for a in added:
+                raw["agents"][a] = default_settings()["agents"][a]
+            with settings_p.open("w", encoding="utf-8") as fh:
+                yaml.safe_dump(raw, fh, sort_keys=False, allow_unicode=True)
+            print(f"update: {settings_p} (added agents: {', '.join(added)})")
+        else:
+            print(f"keep:  {settings_p} (already exists, all agents present)")
     if not tasks_p.exists():
         save_tasks(tasks_p, [])
         print(f"wrote {tasks_p}")
@@ -298,7 +393,8 @@ def cmd_schedule_status(args: argparse.Namespace) -> int:
         print(f"  next run : {nxt.isoformat(sep=' ', timespec='seconds')}")
     if last_dt:
         print(f"  last run : {last_dt.isoformat(sep=' ', timespec='seconds')}")
-        print(f"  exit code: {last_code}")
+        if last_code is not None:
+            print(f"  exit code: {last_code}")
     return 0
 
 
@@ -341,6 +437,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_health = sub.add_parser("health", help="health check all agents (JSON output)")
     p_health.set_defaults(func=cmd_health)
+
+    p_quota = sub.add_parser("quota", help="show per-agent usage quota (5h / weekly / reset)")
+    p_quota.add_argument("--json", action="store_true", help="machine-readable output")
+    p_quota.add_argument("--write", action="store_true", help="also save a snapshot for the GUI")
+    p_quota.add_argument(
+        "--agents", default="", help="comma-separated subset (default: settings.quota_poll.agents)"
+    )
+    p_quota.set_defaults(func=cmd_quota)
+
+    p_qsched = sub.add_parser(
+        "quota-schedule", help="install/remove the periodic quota-poll systemd timer"
+    )
+    p_qsched.add_argument(
+        "action", choices=("install", "uninstall", "status"), help="what to do"
+    )
+    p_qsched.add_argument(
+        "--interval", type=int, default=None, help="minutes between polls (default: settings.yaml)"
+    )
+    p_qsched.set_defaults(func=cmd_quota_schedule)
 
     p_init = sub.add_parser("init", help="seed default config files if missing")
     p_init.set_defaults(func=cmd_init)

@@ -76,7 +76,13 @@ def probe_health(binary: str, health_cmd: Sequence[str], timeout: float = 5.0) -
 def bypass_risk_level(bypass_flags: Sequence[str]) -> str:
     """Heuristic warning level for a bypass flag list."""
     joined = " ".join(bypass_flags).lower()
-    if "yolo" in joined or "dangerously-bypass" in joined or "danger-full" in joined:
+    if (
+        "yolo" in joined
+        or "dangerously-bypass" in joined
+        or "danger-full" in joined
+        or "dangerously-skip" in joined
+        or "bypasspermissions" in joined
+    ):
         return "high"
     if "auto-approve" in joined or "--auto" in joined or "never" in joined:
         return "medium"
@@ -129,6 +135,10 @@ def probe_health_interactive(
     try:
         if agent_id == "agy":
             cmd = [path, "-p", prompt, "--dangerously-skip-permissions"]
+            if model:
+                cmd += ["--model", model]
+        elif agent_id == "grok":
+            cmd = [path, "-p", prompt, "--permission-mode", "bypassPermissions"]
             if model:
                 cmd += ["--model", model]
         elif agent_id == "claude":

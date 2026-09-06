@@ -164,6 +164,8 @@ def test_bypass_risk_classification() -> None:
     assert bypass_risk_level(["--auto"]) == "medium"
     assert bypass_risk_level(["--yolo"]) == "high"
     assert bypass_risk_level(["--sandbox", "danger-full-access"]) == "high"
+    assert bypass_risk_level(["--dangerously-skip-permissions"]) == "high"
+    assert bypass_risk_level(["--permission-mode", "bypassPermissions"]) == "high"
 
 
 # ---------------------------------------------------------------------------
@@ -712,7 +714,7 @@ def test_send_artifacts_integration_fallback_outside_window(
             res.st_mtime = old_time
             res.st_ctime = old_time
             return res
-        return orig_stat(self)
+        return orig_stat(self, *args, **kwargs)
 
     with (
         patch("mdrunner.ui._telegram_settings.load", return_value=mock_telegram_cfg),

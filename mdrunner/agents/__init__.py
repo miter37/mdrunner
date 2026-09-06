@@ -14,6 +14,7 @@ from .agy import AgyAdapter
 from .base import AgentAdapter, ArgvResult, resolve_binary  # re-export
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
+from .grok import GrokAdapter
 from .hermes import HermesAdapter
 from .openclaw import OpenClawAdapter
 from .opencode import OpenCodeAdapter
@@ -28,6 +29,7 @@ ADAPTERS: dict[str, AgentAdapter] = {
     ClaudeAdapter.id: ClaudeAdapter(),
     AgyAdapter.id: AgyAdapter(),
     HermesAdapter.id: HermesAdapter(),
+    GrokAdapter.id: GrokAdapter(),
 }
 
 
@@ -126,6 +128,24 @@ def default_settings() -> dict:
                 },
                 "presets": [
                     {"name": "auto-approve", "args": ["--yolo"]},
+                    {"name": "read-only", "args": []},
+                ],
+            },
+            "grok": {
+                "enabled": True,
+                "binary": "grok",
+                "default_model": None,
+                "health_cmd": ["grok", "--version"],
+                "bypass": {
+                    "scheduled": ["--permission-mode", "bypassPermissions"],
+                    "manual": [],
+                },
+                "presets": [
+                    {
+                        "name": "auto-approve",
+                        "args": ["--permission-mode", "bypassPermissions"],
+                    },
+                    {"name": "plan-only", "args": ["--permission-mode", "plan"]},
                     {"name": "read-only", "args": []},
                 ],
             },

@@ -18,21 +18,33 @@ pytest.importorskip("PySide6", reason="PySide6 not installed; install with `uv s
 def app_and_window(tmp_path, monkeypatch):
     monkeypatch.setenv("RUNCHER_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("RUNCHER_LOG_DIR", str(tmp_path / "log"))
+    monkeypatch.setenv("RUNCHER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("RUNCHER_STATE_DIR", str(tmp_path / "state"))
     (tmp_path / "cfg").mkdir()
     (tmp_path / "log").mkdir()
+    # never shell out during GUI tests
+    import mdrunner.utils.models as _models
+
+    monkeypatch.setattr(_models, "fetch_agent_models", lambda *a, **k: [])
     from PySide6.QtWidgets import QApplication
     from mdrunner.ui.main_window import MainWindow
 
     app = QApplication.instance() or QApplication([])
     win = MainWindow()
-    yield app, win
+    try:
+        yield app, win
+    finally:
+        win.close()
+        app.processEvents()
+        win.deleteLater()
+        app.processEvents()
 
 
 @pytest.mark.gui
 def test_main_window_constructs_empty(app_and_window) -> None:
     _app, win = app_and_window
     assert win.windowTitle().startswith("mdrunner")
-    assert win.table.columnCount() == 7
+    assert win.table.columnCount() == 6
 
 
 @pytest.mark.gui
@@ -82,6 +94,54 @@ def test_main_window_with_task(app_and_window) -> None:
     win.refresh_all()
     assert win.table.rowCount() == 1
     assert win.table.item(0, 0).text() == "Demo Task"
+
+
+@pytest.mark.gui
+def test_quota_panel_renders_snapshot(app_and_window) -> None:
+    _app, win = app_and_window
+    assert win.quota_table.columnCount() == 4
+
+    rows = [
+        {
+            "agent": "codex",
+            "plan": "plus",
+            "windows": [
+                {"label": "5h", "used_percent": 12, "resets_at": None, "window_minutes": 300},
+                {"label": "weekly", "used_percent": 95, "resets_at": None, "window_minutes": 10080},
+            ],
+        },
+        {"agent": "claude", "plan": None, "windows": [], "error": "no structured source"},
+    ]
+    win._render_quota_rows(rows)
+    # 2 codex windows + 1 claude "unavailable" row
+    assert win.quota_table.rowCount() == 3
+    assert win.quota_table.item(0, 0).text() == "codex"
+    assert win.quota_table.item(0, 1).text() == "5h"
+    assert win.quota_table.item(1, 2).text() == "95%"
+    assert win.quota_table.item(2, 0).text() == "claude"
+    assert "no structured source" in win.quota_table.item(2, 1).text()
+
+
+@pytest.mark.gui
+def test_quota_panel_results_handler(app_and_window) -> None:
+    _app, win = app_and_window
+    from mdrunner.quota import QuotaResult, QuotaWindow
+
+    win._quota_worker = object()  # simulate an in-flight probe
+    win._on_quota_results(
+        [
+            QuotaResult(
+                "codex",
+                available=True,
+                confidence="authoritative",
+                plan="plus",
+                windows=[QuotaWindow("weekly", 40, None, 10080)],
+            )
+        ]
+    )
+    assert win._quota_worker is None
+    assert win.quota_refresh_btn.isEnabled()
+    assert win.quota_table.rowCount() == 1
 
 
 @pytest.mark.gui
@@ -158,6 +218,73 @@ def test_task_dialog_notifications_integration(app_and_window) -> None:
     assert saved_task.artifact_extensions == [".md", ".html"]
 
     dlg.deleteLater()
+
+
+@pytest.mark.gui
+def test_task_dialog_inline_prompt_saves_md_and_registers(app_and_window) -> None:
+    _app, win = app_and_window
+    from mdrunner.ui.task_dialog import TaskDialog
+    from mdrunner.config import load_tasks
+    from mdrunner.utils.paths import prompts_dir, tasks_file
+
+    _seed_opencode_settings()
+    win.refresh_all()
+
+    dlg = TaskDialog(parent=win, settings=win.settings, task=None)
+    dlg.in_name.setText("Inline Demo")
+    idx = dlg.in_prompt_source.findData("inline")
+    dlg.in_prompt_source.setCurrentIndex(idx)
+    assert not dlg.in_prompt_editor.isHidden()
+    assert dlg.row_prompt_file.isHidden()
+    dlg.in_prompt_editor.setPlainText("Read 5 headlines and print them.")
+    dlg._on_accept()
+
+    md_files = list(prompts_dir().glob("*.md"))
+    assert len(md_files) == 1
+    assert md_files[0].name.startswith("inline-demo-")
+    assert "5 headlines" in md_files[0].read_text(encoding="utf-8")
+
+    saved = next(t for t in load_tasks(tasks_file()) if t.name == "Inline Demo")
+    assert saved.prompt_file == str(md_files[0])
+
+    # Re-open for edit → inline mode is auto-selected and text is loaded back
+    dlg2 = TaskDialog(parent=win, settings=win.settings, task=saved)
+    assert dlg2._prompt_source() == "inline"
+    assert "5 headlines" in dlg2.in_prompt_editor.toPlainText()
+    dlg2.in_prompt_editor.setPlainText("Updated instruction.")
+    dlg2._on_accept()
+
+    md_files_after = list(prompts_dir().glob("*.md"))
+    assert len(md_files_after) == 1  # edited in place, no new file
+    assert "Updated instruction." in md_files_after[0].read_text(encoding="utf-8")
+    dlg.deleteLater()
+    dlg2.deleteLater()
+
+
+def _seed_opencode_settings() -> None:
+    import yaml
+
+    from mdrunner.utils.paths import settings_file
+
+    settings_file().parent.mkdir(parents=True, exist_ok=True)
+    settings_file().write_text(
+        yaml.safe_dump(
+            {
+                "agents": {
+                    "opencode": {
+                        "enabled": True,
+                        "binary": "opencode",
+                        "default_model": "minimax-coding-plan/MiniMax-M3",
+                        "health_cmd": ["opencode", "--version"],
+                        "bypass": {"scheduled": ["--auto"], "manual": []},
+                        "presets": [],
+                    }
+                },
+                "defaults": {"timeout_minutes": 5},
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 @pytest.mark.gui

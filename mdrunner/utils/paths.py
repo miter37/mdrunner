@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from platformdirs import user_config_dir, user_log_dir
+from platformdirs import user_config_dir, user_data_dir, user_log_dir, user_state_dir
 
 APP_NAME = "mdrunner"
 
@@ -17,6 +17,31 @@ def config_dir() -> Path:
         p = Path(override).expanduser().resolve()
     else:
         p = Path(user_config_dir(APP_NAME, appauthor=False))
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def data_dir() -> Path:
+    """Return the mdrunner user-data directory; create it if missing.
+
+    This is where the app keeps content it manages on the user's behalf
+    (as opposed to `config_dir()`, which holds settings). On Linux that
+    is ``~/.local/share/mdrunner`` (XDG), on macOS
+    ``~/Library/Application Support/mdrunner``, on Windows
+    ``%LOCALAPPDATA%\\mdrunner``. Honors RUNCHER_DATA_DIR for tests.
+    """
+    override = os.environ.get("RUNCHER_DATA_DIR")
+    if override:
+        p = Path(override).expanduser().resolve()
+    else:
+        p = Path(user_data_dir(APP_NAME, appauthor=False))
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def prompts_dir() -> Path:
+    """Return the folder where inline-authored prompt md files are stored."""
+    p = data_dir() / "prompts"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -38,6 +63,25 @@ def log_dir() -> Path:
         p = Path(user_log_dir(APP_NAME, appauthor=False))
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def state_dir() -> Path:
+    """Return the mdrunner state directory (small machine-local snapshots).
+
+    Linux: ``~/.local/state/mdrunner``. Honors RUNCHER_STATE_DIR for tests.
+    """
+    override = os.environ.get("RUNCHER_STATE_DIR")
+    if override:
+        p = Path(override).expanduser().resolve()
+    else:
+        p = Path(user_state_dir(APP_NAME, appauthor=False))
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def quota_snapshot_file() -> Path:
+    """Latest agent-quota snapshot written by `mdrunner quota --write`."""
+    return state_dir() / "quota.json"
 
 
 def task_log_file(task_id: str) -> Path:

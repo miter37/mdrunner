@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import QLabel, QPlainTextEdit, QVBoxLayout, QWidget
 
 from ..config import Task
+from .theme import mono_font
 
 
 class LogView(QWidget):
@@ -18,18 +19,16 @@ class LogView(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(0, 6, 0, 0)
         layout.setSpacing(2)
 
-        self.header = QLabel("Log (no task running)", self)
-        self.header.setStyleSheet("font-weight: bold; padding: 4px;")
+        self.header = QLabel("Log · no task running", self)
+        self.header.setObjectName("logHeader")
         layout.addWidget(self.header)
 
         self.text = QPlainTextEdit(self)
         self.text.setReadOnly(True)
-        font = QFont("Monospace")
-        font.setStyleHint(QFont.StyleHint.TypeWriter)
-        self.text.setFont(font)
+        self.text.setFont(mono_font(10))
         self.text.setMaximumBlockCount(self.MAX_LINES)
         self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         layout.addWidget(self.text, 1)

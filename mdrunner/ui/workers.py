@@ -177,6 +177,29 @@ class ModelFetchWorker(QThread):
             self.signals.error.emit(str(e))
 
 
+class _QuotaSignals(QObject):
+    results_ready = Signal(list)  # list[QuotaResult]
+
+
+class QuotaFetchWorker(QThread):
+    """Probes each agent's usage quota off the UI thread (codex spawns a
+    short-lived `app-server`, so this must not block the GUI)."""
+
+    def __init__(self, agent_ids: list[str]) -> None:
+        super().__init__()
+        self.agent_ids = agent_ids
+        self.signals = _QuotaSignals()
+        self.results_ready = self.signals.results_ready
+
+    def run(self) -> None:
+        try:
+            from ..quota import quota_summary
+
+            self.signals.results_ready.emit(quota_summary(self.agent_ids))
+        except Exception:  # noqa: BLE001
+            self.signals.results_ready.emit([])
+
+
 class _SingleHealthSignals(QObject):
     progress = Signal(str)
     finished = Signal(object)
