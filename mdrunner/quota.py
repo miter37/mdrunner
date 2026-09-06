@@ -469,13 +469,13 @@ def probe_quota(agent_id: str, binary: str | None = None) -> QuotaResult:
 
 
 def quota_summary(agent_ids: list[str] | tuple[str, ...] | None = None) -> list[QuotaResult]:
-    """Probe several agents concurrently (each probe may spawn a short-lived
-    helper process, so run them in parallel). Order matches ``agent_ids``."""
-    agents = list(agent_ids or QUOTA_AGENTS)
-    from concurrent.futures import ThreadPoolExecutor
+    """Probe each agent, one at a time.
 
-    with ThreadPoolExecutor(max_workers=max(1, len(agents))) as pool:
-        return list(pool.map(probe_quota, agents))
+    The claude/agy probes drive an interactive TUI on a pseudo-terminal;
+    running two of those at once makes the fixed-delay keystroke script
+    race the slower-starting UI, so keep it sequential.
+    """
+    return [probe_quota(a) for a in (agent_ids or QUOTA_AGENTS)]
 
 
 # ---------------------------------------------------------------------------

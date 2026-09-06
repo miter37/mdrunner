@@ -182,8 +182,13 @@ class _QuotaSignals(QObject):
 
 
 class QuotaFetchWorker(QThread):
-    """Probes each agent's usage quota off the UI thread (codex spawns a
-    short-lived `app-server`, so this must not block the GUI)."""
+    """Refresh agent quota by shelling out to ``mdrunner quota --json --write``.
+
+    The claude/agy probes call ``pty.fork()``; doing that from inside a Qt
+    worker thread is unsafe (fork in a multi-threaded process). Run it in a
+    clean child process instead — which also writes the snapshot itself.
+    Emits a list of plain dicts (one per agent).
+    """
 
     def __init__(self, agent_ids: list[str]) -> None:
         super().__init__()
@@ -192,10 +197,20 @@ class QuotaFetchWorker(QThread):
         self.results_ready = self.signals.results_ready
 
     def run(self) -> None:
-        try:
-            from ..quota import quota_summary
+        import json
+        import subprocess
+        import sys
 
-            self.signals.results_ready.emit(quota_summary(self.agent_ids))
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "mdrunner", "quota", "--json", "--write",
+                 "--agents", ",".join(self.agent_ids)],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            data = json.loads(proc.stdout or "{}")
+            self.signals.results_ready.emit(list(data.values()))
         except Exception:  # noqa: BLE001
             self.signals.results_ready.emit([])
 

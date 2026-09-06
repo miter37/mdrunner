@@ -125,18 +125,21 @@ def test_quota_panel_renders_snapshot(app_and_window) -> None:
 @pytest.mark.gui
 def test_quota_panel_results_handler(app_and_window) -> None:
     _app, win = app_and_window
-    from mdrunner.quota import QuotaResult, QuotaWindow
 
     win._quota_worker = object()  # simulate an in-flight probe
+    # the worker now emits plain dicts (from `mdrunner quota --json`)
     win._on_quota_results(
         [
-            QuotaResult(
-                "codex",
-                available=True,
-                confidence="authoritative",
-                plan="plus",
-                windows=[QuotaWindow("weekly", 40, None, 10080)],
-            )
+            {
+                "agent": "codex",
+                "available": True,
+                "confidence": "authoritative",
+                "plan": "plus",
+                "windows": [
+                    {"label": "weekly", "used_percent": 40, "resets_at": None,
+                     "window_minutes": 10080}
+                ],
+            }
         ]
     )
     assert win._quota_worker is None

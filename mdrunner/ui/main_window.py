@@ -613,24 +613,20 @@ class MainWindow(QMainWindow):
         if getattr(self, "_quota_worker", None) is not None:
             return
         self.quota_refresh_btn.setEnabled(False)
-        self.quota_status.setText("Checking… (up to ~30s)")
+        self.quota_status.setText("Checking… (up to ~1 min)")
         self._quota_worker = QuotaFetchWorker(self._quota_agents())
         self._quota_worker.results_ready.connect(self._on_quota_results)
         self._quota_worker.start()
 
     def _on_quota_results(self, results: list) -> None:
+        # results: list of plain agent dicts from `mdrunner quota --json`
+        # (the child process already wrote the snapshot).
         self._quota_worker = None
         self.quota_refresh_btn.setEnabled(True)
         if not results:
-            self.quota_status.setText("Couldn't read quota")
+            self.quota_status.setText("Couldn't read quota — try again")
             return
-        from ..quota import save_snapshot
-
-        self._render_quota_rows([r.to_dict() for r in results])
-        try:
-            save_snapshot(results)
-        except OSError:
-            pass
+        self._render_quota_rows(results)
         self.quota_status.setText(
             "Updated " + _dt.datetime.now().strftime("%H:%M:%S")
         )
