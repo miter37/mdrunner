@@ -69,3 +69,24 @@ def test_send_document_http_error(tmp_path):
         )
         assert not ok
         assert "HTTP Error 400" in err
+
+
+def test_send_document_json_failure_is_not_success(tmp_path):
+    file_path = tmp_path / "test.txt"
+    file_path.write_text("dummy", encoding="utf-8")
+
+    mock_response = MagicMock()
+    mock_response.__enter__.return_value = mock_response
+    mock_response.read.return_value = (
+        b'{"ok": false, "error_code": 403, "description": "bot was blocked"}'
+    )
+
+    with patch("urllib.request.urlopen", return_value=mock_response):
+        ok, err = send_document(
+            bot_token="token123",
+            chat_id="chat456",
+            file_path=str(file_path),
+        )
+
+    assert not ok
+    assert "bot was blocked" in err

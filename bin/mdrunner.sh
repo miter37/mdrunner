@@ -29,6 +29,20 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 MD_RUNNER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Desktop launchers do not load the interactive shell startup files, so they
+# normally miss tools installed by nvm (including codex).  Add every installed
+# Node version's bin directory before starting Python; the newest version is
+# listed last by the glob and therefore takes precedence below.
+NVM_NODE_ROOT="${NVM_DIR:-$HOME/.nvm}/versions/node"
+if [ -d "$NVM_NODE_ROOT" ]; then
+    for node_bin in "$NVM_NODE_ROOT"/*/bin; do
+        if [ -d "$node_bin" ]; then
+            PATH="$node_bin:$PATH"
+        fi
+    done
+    export PATH
+fi
+
 # Detect GUI mode: --gui flag or MDRUNNER_GUI=1 env var
 GUI_MODE=0
 if [ "${1:-}" = "--gui" ] || [ -n "${MDRUNNER_GUI:-}" ]; then

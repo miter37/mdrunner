@@ -137,9 +137,11 @@ def probe_health_interactive(
                 cmd += ["--model", model]
             stdin_data = prompt
         elif agent_id == "codex":
-            cmd = [path, "exec", "--dangerously-bypass-approvals-and-sandbox", prompt]
+            cmd = [path, "exec", "--yolo"]
             if model:
                 cmd += ["--model", model]
+            cmd += ["-"]
+            stdin_data = prompt
         elif agent_id == "opencode":
             cmd = [path, "run", prompt, "--auto"]
             if model:

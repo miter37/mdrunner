@@ -30,6 +30,13 @@ VALID_WEEKDAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
 VALID_SCHEDULE_MODES = {"once", "daily", "weekly", "interval"}
 
 
+def _schedule_time_from_yaml(value: Any) -> str:
+    """Normalize PyYAML's legacy sexagesimal parsing for unquoted HH:MM."""
+    if isinstance(value, int) and 60 <= value < 24 * 60:
+        return f"{value // 60:02d}:{value % 60:02d}"
+    return str(value)
+
+
 @dataclass
 class Schedule:
     mode: str = "weekly"
@@ -74,7 +81,7 @@ def task_from_dict(data: dict[str, Any]) -> Task:
     schedule = Schedule(
         mode=str(sched_data.get("mode", "weekly")),
         days=[str(d).lower() for d in sched_data.get("days", [])],
-        time=str(sched_data.get("time", "07:00")),
+        time=_schedule_time_from_yaml(sched_data.get("time", "07:00")),
         timezone=str(sched_data.get("timezone", "Asia/Seoul")),
         interval_minutes=int(sched_data.get("interval_minutes", 60)),
     )

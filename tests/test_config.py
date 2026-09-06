@@ -48,6 +48,24 @@ def test_task_roundtrip() -> None:
     assert again == t
 
 
+def test_unquoted_yaml_time_sexagesimal_is_normalized() -> None:
+    import yaml
+
+    raw = yaml.safe_load(
+        """
+id: afternoon
+name: Afternoon
+schedule:
+  mode: daily
+  time: 14:14
+"""
+    )
+
+    assert raw["schedule"]["time"] == 854
+    task = task_from_dict(raw)
+    assert task.schedule.time == "14:14"
+
+
 def test_settings_roundtrip() -> None:
     raw = {
         "agents": {

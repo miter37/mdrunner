@@ -18,6 +18,7 @@ from typing import Sequence
 class ArgvResult:
     argv: list[str]
     cwd: Path | None
+    stdin_text: str | None = None
 
 
 class AgentAdapter(ABC):

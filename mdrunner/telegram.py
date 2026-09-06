@@ -6,9 +6,34 @@ so this doesn't surprise users with surprise messages.
 
 from __future__ import annotations
 
+import json
 import urllib.parse
 import urllib.request
+from urllib.error import HTTPError
 from typing import Any
+
+
+def _decode_api_response(body: str) -> tuple[bool, str]:
+    """Validate Telegram's JSON-level success flag and return useful detail."""
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return False, f"invalid Telegram API response: {body[:300]}"
+    if payload.get("ok") is True:
+        return True, body[:300]
+    description = payload.get("description") or "Telegram API returned ok=false"
+    error_code = payload.get("error_code")
+    suffix = f" (HTTP/API error {error_code})" if error_code is not None else ""
+    return False, f"{description}{suffix}"
+
+
+def _http_error_detail(exc: HTTPError) -> str:
+    try:
+        body = exc.read().decode("utf-8", errors="replace")
+        ok, detail = _decode_api_response(body)
+        return detail if not ok else f"HTTP {exc.code}: {detail}"
+    except Exception:  # noqa: BLE001
+        return f"HTTP {exc.code}: {exc.reason}"
 
 
 def send(
@@ -31,7 +56,9 @@ def send(
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
-            return True, body[:300]
+            return _decode_api_response(body)
+    except HTTPError as exc:
+        return False, _http_error_detail(exc)
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
 
@@ -117,6 +144,8 @@ def send_document(
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             res_body = resp.read().decode("utf-8", errors="replace")
-            return True, res_body[:300]
+            return _decode_api_response(res_body)
+    except HTTPError as exc:
+        return False, _http_error_detail(exc)
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)

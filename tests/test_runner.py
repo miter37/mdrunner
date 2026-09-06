@@ -18,7 +18,13 @@ import mdrunner.agents as agents_mod
 from mdrunner.agents import AgentAdapter, ArgvResult
 from mdrunner.config import Settings, load_settings
 from mdrunner.health import bypass_risk_level, probe_health
-from mdrunner.runner import detect_saved_file, run_task, preview_task
+from mdrunner.runner import (
+    RunResult,
+    _send_result_artifacts_via_telegram,
+    detect_saved_file,
+    preview_task,
+    run_task,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +389,7 @@ def test_send_artifacts_integration_via_saved_file(
 
     with (
         patch("mdrunner.ui._telegram_settings.load", return_value=mock_telegram_cfg),
-        patch("mdrunner.telegram.send_document") as mock_send,
+        patch("mdrunner.telegram.send_document", return_value=(True, '{"ok": true}')) as mock_send,
     ):
         settings = load_settings(settings_p)
         result = run_task(
@@ -399,6 +405,163 @@ def test_send_artifacts_integration_via_saved_file(
         assert kwargs["file_path"] == str(tmp_path / "output-ko.md")
         assert "T" in kwargs["caption"]
         assert "소요 시간" in kwargs["caption"]
+
+
+def test_artifact_delivery_reports_send_failure(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    from mdrunner.config import Task
+
+    artifact = tmp_path / "result.html"
+    artifact.write_text("<html></html>", encoding="utf-8")
+    task = Task(
+        id="delivery-failure",
+        name="Delivery Failure",
+        prompt_file=str(tmp_path / "prompt.md"),
+        notify_artifact=True,
+        artifact_dir=str(tmp_path),
+        artifact_extensions=[".html"],
+    )
+    result = RunResult(
+        task_id=task.id,
+        started_at=100.0,
+        finished_at=110.0,
+        exit_code=0,
+        timed_out=False,
+        binary_path="fake",
+        saved_file=str(artifact),
+    )
+
+    with (
+        patch("mdrunner.ui._telegram_settings.load", return_value={"bot_token": "t", "chat_id": "c"}),
+        patch("mdrunner.telegram.send_document", return_value=(False, "HTTP Error 403")),
+    ):
+        delivery = _send_result_artifacts_via_telegram(task, Settings(), result)
+
+    assert not delivery.ok
+    assert delivery.sent_files == []
+    assert "403" in delivery.error
+
+
+def test_artifact_prompt_is_augmented_only_when_delivery_enabled(
+    tmp_path: Path, fake_agent_dir: Path, config_paths
+) -> None:
+    import yaml
+    from unittest.mock import patch
+
+    tasks_p, settings_p = config_paths
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("original prompt", encoding="utf-8")
+    (tmp_path / "output-ko.md").write_text("artifact", encoding="utf-8")
+    write_settings(settings_p)
+
+    raw = {
+        "tasks": [
+            {
+                "id": "t",
+                "name": "T",
+                "enabled": True,
+                "agent": "fake",
+                "prompt_file": str(prompt),
+                "working_dir": str(tmp_path),
+                "notify_artifact": True,
+                "artifact_dir": str(tmp_path),
+                "artifact_extensions": [".md"],
+            }
+        ]
+    }
+    with tasks_p.open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(raw, fh)
+
+    with (
+        patch("mdrunner.ui._telegram_settings.load", return_value={"bot_token": "t", "chat_id": "c"}),
+        patch("mdrunner.telegram.send_document", return_value=(True, '{"ok": true}')),
+    ):
+        result = run_task("t", mode="scheduled", settings=load_settings(settings_p), tasks_file=tasks_p)
+
+    assert result.ok
+    assert prompt.read_text(encoding="utf-8") == "original prompt"
+    log = Path(result.log_file).read_text(encoding="utf-8")
+    assert "Saved: /absolute/path/to/the_actual_file" in log
+    assert "telegram artifact delivery succeeded" in log
+
+
+def test_artifact_delivery_failure_marks_run_failed(
+    tmp_path: Path, fake_agent_dir: Path, config_paths
+) -> None:
+    from unittest.mock import patch
+    import yaml
+
+    tasks_p, settings_p = config_paths
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("original prompt", encoding="utf-8")
+    (tmp_path / "output-ko.md").write_text("artifact", encoding="utf-8")
+    write_settings(settings_p)
+    with tasks_p.open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(
+            {
+                "tasks": [
+                    {
+                        "id": "t",
+                        "name": "T",
+                        "enabled": True,
+                        "agent": "fake",
+                        "prompt_file": str(prompt),
+                        "working_dir": str(tmp_path),
+                        "notify_artifact": True,
+                        "artifact_dir": str(tmp_path),
+                        "artifact_extensions": [".md"],
+                    }
+                ]
+            },
+            fh,
+        )
+
+    with (
+        patch("mdrunner.ui._telegram_settings.load", return_value={"bot_token": "t", "chat_id": "c"}),
+        patch("mdrunner.telegram.send_document", return_value=(False, "HTTP Error 403")),
+    ):
+        result = run_task("t", mode="scheduled", settings=load_settings(settings_p), tasks_file=tasks_p)
+
+    assert not result.ok
+    assert result.error and "403" in result.error
+    assert result.log_file and "telegram artifact delivery failed" in Path(result.log_file).read_text()
+
+
+def test_artifact_prompt_is_unchanged_when_delivery_disabled(
+    tmp_path: Path, fake_agent_dir: Path, config_paths
+) -> None:
+    import yaml
+
+    tasks_p, settings_p = config_paths
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("original prompt", encoding="utf-8")
+    write_settings(settings_p)
+    with tasks_p.open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(
+            {
+                "tasks": [
+                    {
+                        "id": "t",
+                        "name": "T",
+                        "enabled": True,
+                        "agent": "fake",
+                        "prompt_file": str(prompt),
+                        "working_dir": str(tmp_path),
+                        "notify_artifact": False,
+                    }
+                ]
+            },
+            fh,
+        )
+
+    result = run_task("t", mode="scheduled", settings=load_settings(settings_p), tasks_file=tasks_p)
+
+    assert result.ok
+    assert prompt.read_text(encoding="utf-8") == "original prompt"
+    assert result.log_file
+    log = Path(result.log_file).read_text(encoding="utf-8")
+    assert "Saved: /absolute/path/to/the_actual_file" not in log
 
 
 def test_send_artifacts_integration_via_fallback(
@@ -462,7 +625,7 @@ def test_send_artifacts_integration_via_fallback(
 
     with (
         patch("mdrunner.ui._telegram_settings.load", return_value=mock_telegram_cfg),
-        patch("mdrunner.telegram.send_document") as mock_send,
+        patch("mdrunner.telegram.send_document", return_value=(True, '{"ok": true}')) as mock_send,
     ):
         settings = load_settings(settings_p)
         result = run_task(
@@ -543,7 +706,7 @@ def test_send_artifacts_integration_fallback_outside_window(
 
     orig_stat = Path.stat
 
-    def mock_stat(self):
+    def mock_stat(self, *args, **kwargs):
         if self.name == "old_result.txt":
             res = MagicMock()
             res.st_mtime = old_time
@@ -561,5 +724,6 @@ def test_send_artifacts_integration_fallback_outside_window(
             "t", mode="manual", settings=settings, tasks_file=tasks_p, settings_file=settings_p
         )
 
-        assert result.ok
+        assert not result.ok
+        assert result.error and "no artifact file found" in result.error
         assert mock_send.call_count == 0

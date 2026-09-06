@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=mdrunner
+Comment=md-driven CLI agent task runner
+Exec=/home/doyoonkim/APPs/mdrunner/bin/mdrunner.sh --gui
+Icon=system-run
+Terminal=false
+Categories=Utility;Development;

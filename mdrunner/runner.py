@@ -21,6 +21,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -100,6 +101,54 @@ class RunResult:
     @property
     def ok(self) -> bool:
         return self.exit_code == 0 and not self.timed_out and self.error is None
+
+
+@dataclass
+class ArtifactDeliveryResult:
+    ok: bool
+    attempted_files: list[str] = field(default_factory=list)
+    sent_files: list[str] = field(default_factory=list)
+    error: str | None = None
+
+
+ARTIFACT_PROMPT_INSTRUCTION = """
+
+--- mdrunner artifact delivery requirement ---
+If you create a result file intended for delivery, verify that the file really
+exists before finishing. In your final response, print one separate line using
+this exact format, replacing the example with the actual absolute path:
+Saved: /absolute/path/to/the_actual_file
+Do not print a Saved: line for a file that does not exist, and do not invent a
+path. If there is no result file, do not print a Saved: line.
+--- end mdrunner artifact delivery requirement ---
+""".strip()
+
+
+@contextmanager
+def _prompt_file_for_task(task: Task, prompt_file: Path) -> Iterator[Path]:
+    """Yield the prompt path, augmenting it only for artifact delivery tasks."""
+    if not task.notify_artifact:
+        yield prompt_file
+        return
+
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".md", prefix="mdrunner-prompt-", delete=False
+        ) as fh:
+            temporary_path = Path(fh.name)
+            original = prompt_file.read_text(encoding="utf-8")
+            fh.write(original)
+            if original and not original.endswith("\n"):
+                fh.write("\n")
+            fh.write("\n" + ARTIFACT_PROMPT_INSTRUCTION + "\n")
+        yield temporary_path
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -235,11 +284,27 @@ def run_task(
 
     result = _execute(task, agent_cfg, settings.defaults, mode, timeout_override)
     if result.ok and task.notify_artifact:
-        _send_result_artifacts_via_telegram(task, settings, result)
+        delivery = _send_result_artifacts_via_telegram(task, settings, result)
+        if delivery.ok:
+            if result.log_file:
+                with Path(result.log_file).open("a", encoding="utf-8") as log_fh:
+                    log_fh.write(
+                        "\n[mdrunner] telegram artifact delivery succeeded: "
+                        f"{', '.join(delivery.sent_files)}\n"
+                    )
+        else:
+            result.error = delivery.error or "Telegram artifact delivery failed"
+            if result.log_file:
+                with Path(result.log_file).open("a", encoding="utf-8") as log_fh:
+                    log_fh.write(
+                        f"\n[mdrunner] telegram artifact delivery failed: {result.error}\n"
+                    )
     return result
 
 
-def _send_result_artifacts_via_telegram(task: Task, settings: Settings, result: RunResult) -> None:
+def _send_result_artifacts_via_telegram(
+    task: Task, settings: Settings, result: RunResult
+) -> ArtifactDeliveryResult:
     from .ui import _telegram_settings
     from . import telegram
 
@@ -247,7 +312,10 @@ def _send_result_artifacts_via_telegram(task: Task, settings: Settings, result: 
     bot_token = cfg.get("bot_token")
     chat_id = cfg.get("chat_id")
     if not bot_token or not chat_id:
-        return
+        return ArtifactDeliveryResult(
+            ok=False,
+            error="Telegram bot_token / chat_id not configured",
+        )
 
     # 결과물 수집 리스트
     files_to_send = []
@@ -283,6 +351,18 @@ def _send_result_artifacts_via_telegram(task: Task, settings: Settings, result: 
                         except OSError:
                             pass
 
+    if not files_to_send:
+        return ArtifactDeliveryResult(
+            ok=False,
+            error=(
+                f"no artifact file found for delivery in {task.artifact_dir or '(no artifact_dir)'}"
+            ),
+        )
+
+    attempted_files: list[str] = []
+    sent_files: list[str] = []
+    errors: list[str] = []
+
     # 파일 전송 실행
     model_name = task.model or "기본 모델"
     if "--model" in result.argv:
@@ -299,9 +379,24 @@ def _send_result_artifacts_via_telegram(task: Task, settings: Settings, result: 
             f"- 실행 모델: {model_name}\n"
             f"- 소요 시간: {result.duration_seconds:.1f}초"
         )
-        telegram.send_document(
-            bot_token=bot_token, chat_id=chat_id, file_path=str(fp), caption=caption
-        )
+        attempted_files.append(str(fp))
+        try:
+            ok, detail = telegram.send_document(
+                bot_token=bot_token, chat_id=chat_id, file_path=str(fp), caption=caption
+            )
+        except Exception as exc:  # noqa: BLE001
+            ok, detail = False, str(exc)
+        if ok:
+            sent_files.append(str(fp))
+        else:
+            errors.append(f"{fp}: {detail}")
+
+    return ArtifactDeliveryResult(
+        ok=not errors and len(sent_files) == len(attempted_files),
+        attempted_files=attempted_files,
+        sent_files=sent_files,
+        error="; ".join(errors) if errors else None,
+    )
 
 
 def _execute(
@@ -354,110 +449,116 @@ def _execute(
             error=f"working_dir not found: {working_dir}",
         )
 
-    argv_result = adapter.build_argv(
-        prompt_file,
-        model=model,
-        working_dir=working_dir,
-        extra_args=task.extra_args,
-        bypass_flags=bypass,
-    )
-    argv = argv_result.argv
-    cwd = argv_result.cwd or working_dir
+    with _prompt_file_for_task(task, prompt_file) as effective_prompt_file:
+        argv_result = adapter.build_argv(
+            effective_prompt_file,
+            model=model,
+            working_dir=working_dir,
+            extra_args=task.extra_args,
+            bypass_flags=bypass,
+        )
+        argv = argv_result.argv
+        cwd = argv_result.cwd or working_dir
+        stdin_text = argv_result.stdin_text
 
-    timeout_minutes = timeout_override if timeout_override is not None else task.timeout_minutes
-    if timeout_minutes <= 0:
-        timeout_seconds = None  # no limit
-    else:
-        timeout_seconds = timeout_minutes * 60
+        timeout_minutes = timeout_override if timeout_override is not None else task.timeout_minutes
+        if timeout_minutes <= 0:
+            timeout_seconds = None  # no limit
+        else:
+            timeout_seconds = timeout_minutes * 60
 
-    log_path = task_log_file(task.id)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    started = time.time()
-    accumulated_text: list[str] = []
-    saved_file: str | None = None
-    timed_out = False
-    exit_code: int | None = None
-    error: str | None = None
+        log_path = task_log_file(task.id)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        started = time.time()
+        accumulated_text: list[str] = []
+        saved_file: str | None = None
+        timed_out = False
+        exit_code: int | None = None
+        error: str | None = None
 
-    try:
-        with task_lock(task.id):
-            with log_path.open("a", encoding="utf-8") as log_fh:
-                log_fh.write(
-                    f"\n===== mdrunner start {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started))} "
-                    f"task={task.id} mode={mode} agent={task.agent} model={model or '-'} =====\n"
-                )
-                log_fh.write(f"$ {' '.join(shlex.quote(a) for a in argv)}\n")
-                log_fh.flush()
+        try:
+            with task_lock(task.id):
+                with log_path.open("a", encoding="utf-8") as log_fh:
+                    log_fh.write(
+                        f"\n===== mdrunner start {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started))} "
+                        f"task={task.id} mode={mode} agent={task.agent} model={model or '-'} =====\n"
+                    )
+                    log_fh.write(f"$ {' '.join(shlex.quote(a) for a in argv)}\n")
+                    log_fh.flush()
 
-                proc = subprocess.Popen(
-                    argv,
-                    cwd=str(cwd) if cwd else None,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    env=os.environ.copy(),
-                    start_new_session=(sys.platform != "win32"),
-                )
+                    proc = subprocess.Popen(
+                        argv,
+                        cwd=str(cwd) if cwd else None,
+                        stdin=subprocess.PIPE if stdin_text is not None else None,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                        env=os.environ.copy(),
+                        start_new_session=(sys.platform != "win32"),
+                    )
 
-                deadline = None if timeout_seconds is None else started + timeout_seconds
-                try:
-                    assert proc.stdout is not None
-                    for line in proc.stdout:
-                        log_fh.write(line)
-                        log_fh.flush()
-                        accumulated_text.append(line)
-                        # Streaming save-marker scan: cheap, but we only look at
-                        # the last ~4 KB so the cost stays bounded for long runs.
-                        # After the run finishes we do a full scan below.
-                        recent_window = "".join(accumulated_text[-200:])
-                        saved_file = detect_saved_file(recent_window, defaults.artifact_markers)
-                        if deadline is not None and time.time() > deadline:
-                            timed_out = True
-                            _terminate_process_tree(proc)
-                            try:
-                                proc.wait(timeout=5)
-                            except subprocess.TimeoutExpired:
-                                _kill_process_tree(proc)
-                                proc.wait(timeout=5)
-                            break
-                    exit_code = proc.wait()
-                except KeyboardInterrupt:
-                    _terminate_process_tree(proc)
-                    proc.wait(timeout=5)
-                    error = "interrupted"
-                finally:
-                    if proc.poll() is None:
+                    deadline = None if timeout_seconds is None else started + timeout_seconds
+                    try:
+                        if stdin_text is not None and proc.stdin is not None:
+                            proc.stdin.write(stdin_text)
+                            proc.stdin.close()
+                        assert proc.stdout is not None
+                        for line in proc.stdout:
+                            log_fh.write(line)
+                            log_fh.flush()
+                            accumulated_text.append(line)
+                            # Streaming save-marker scan: cheap, but we only look at
+                            # the last ~4 KB so the cost stays bounded for long runs.
+                            # After the run finishes we do a full scan below.
+                            recent_window = "".join(accumulated_text[-200:])
+                            saved_file = detect_saved_file(recent_window, defaults.artifact_markers)
+                            if deadline is not None and time.time() > deadline:
+                                timed_out = True
+                                _terminate_process_tree(proc)
+                                try:
+                                    proc.wait(timeout=5)
+                                except subprocess.TimeoutExpired:
+                                    _kill_process_tree(proc)
+                                    proc.wait(timeout=5)
+                                break
+                        exit_code = proc.wait()
+                    except KeyboardInterrupt:
                         _terminate_process_tree(proc)
                         proc.wait(timeout=5)
-    except LockBusyError as exc:
+                        error = "interrupted"
+                    finally:
+                        if proc.poll() is None:
+                            _terminate_process_tree(proc)
+                            proc.wait(timeout=5)
+        except LockBusyError as exc:
+            return RunResult(
+                task_id=task.id,
+                started_at=started,
+                finished_at=time.time(),
+                exit_code=None,
+                timed_out=False,
+                binary_path=binary_path,
+                argv=argv,
+                log_file=str(log_path),
+                error=str(exc),
+            )
+
+        finished = time.time()
+        if saved_file is None:
+            saved_file = detect_saved_file("".join(accumulated_text), defaults.artifact_markers)
         return RunResult(
             task_id=task.id,
             started_at=started,
-            finished_at=time.time(),
-            exit_code=None,
-            timed_out=False,
+            finished_at=finished,
+            exit_code=exit_code,
+            timed_out=timed_out,
             binary_path=binary_path,
             argv=argv,
             log_file=str(log_path),
-            error=str(exc),
+            saved_file=saved_file,
+            error=error,
         )
-
-    finished = time.time()
-    if saved_file is None:
-        saved_file = detect_saved_file("".join(accumulated_text), defaults.artifact_markers)
-    return RunResult(
-        task_id=task.id,
-        started_at=started,
-        finished_at=finished,
-        exit_code=exit_code,
-        timed_out=timed_out,
-        binary_path=binary_path,
-        argv=argv,
-        log_file=str(log_path),
-        saved_file=saved_file,
-        error=error,
-    )
 
 
 # ---------------------------------------------------------------------------

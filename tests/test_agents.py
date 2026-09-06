@@ -43,11 +43,31 @@ def test_codex_basic(tmp_path: Path) -> None:
                              bypass_flags=("--yolo",))
     assert res.argv[0] == "codex"
     assert res.argv[1] == "exec"
-    assert "codex prompt" in res.argv
+    assert res.argv[-1] == "-"
     assert "--cd" in res.argv
     assert "/tmp" in res.argv
     assert "--yolo" in res.argv
     assert "--sandbox" in res.argv
+    assert res.stdin_text == "codex prompt"
+
+
+def test_codex_prompt_starting_with_frontmatter_goes_via_stdin(tmp_path: Path) -> None:
+    md = tmp_path / "task.md"
+    md.write_text("---\nname: demo\n---\nbody", encoding="utf-8")
+    adapter = get_adapter("codex")
+    res = adapter.build_argv(md, model="gpt-5.4", working_dir=None,
+                             extra_args=(), bypass_flags=("--yolo",))
+    assert res.argv[-1] == "-"
+    assert "---\nname: demo\n---\nbody" == res.stdin_text
+
+
+def test_codex_defaults_to_noninteractive_yolo_when_bypass_is_empty(tmp_path: Path) -> None:
+    md = tmp_path / "task.md"
+    md.write_text("codex prompt", encoding="utf-8")
+    adapter = get_adapter("codex")
+    res = adapter.build_argv(md, model="gpt-5.4", working_dir=None,
+                             extra_args=(), bypass_flags=())
+    assert "--yolo" in res.argv
 
 
 def test_openclaw_basic(tmp_path: Path) -> None:
