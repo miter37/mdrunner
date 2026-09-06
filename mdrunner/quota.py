@@ -355,16 +355,22 @@ def _probe_claude(binary: str, timeout: float = 28.0) -> QuotaResult:
 
     if not _ptyusage.supported():
         return QuotaResult("claude", False, error="PTY scrape unsupported on this platform")
-    # Claude may open a "trust this folder?" prompt on a fresh session; the
-    # default choice is "No, exit", so arrow-down to "Yes, I trust" + Enter
-    # first. If there is no prompt those keys land harmlessly in the input.
+    # Claude may open a "trust this folder?" prompt on a fresh session (default
+    # choice is "No, exit") — arrow-down to "Yes, I trust" + Enter. If there's
+    # no prompt those keys land harmlessly in the input box. Each step waits
+    # for the screen to be ready rather than a fixed sleep.
     text = _ptyusage.capture_screen(
         [path],
         cwd=os.path.expanduser("~"),
-        script=[
-            (3.5, "\x1b[B"), (4.0, "\r"),
-            (7.0, "/usage"), (7.8, "\r"), (10.0, "\r"), (13.0, "\r"),
+        steps=[
+            (("await", r"trust this folder|for shortcuts|Try \"|>\s", 12.0), "\x1b[B"),
+            (0.4, "\r"),
+            (("await", r"for shortcuts|Try \"|\?\s+for", 12.0), "/usage"),
+            (0.35, "\r"),
+            (1.6, "\r"),
         ],
+        # only stop once a fully-painted, parseable weekly line is on screen
+        stop_when=r"Current\s+week[^\n]*\n[^\n]*?\d+\s*%\s*used",
         total_seconds=timeout,
     )
     windows = _parse_claude_usage(text)
@@ -428,7 +434,13 @@ def _probe_agy(binary: str, timeout: float = 32.0) -> QuotaResult:
     text = _ptyusage.capture_screen(
         [path],
         cwd=os.path.expanduser("~"),
-        script=[(9.0, "/usage"), (10.0, "\r"), (12.0, "\r"), (14.0, "\r")],
+        steps=[
+            (("await", r"Navigate|for shortcuts|\bhelp\b|›|▌|esc to", 16.0), "/usage"),
+            (0.4, "\r"),
+            (2.0, "\r"),
+            (2.0, "\r"),
+        ],
+        stop_when=r"Five Hour Limit|Weekly Limit",
         total_seconds=timeout,
     )
     windows = _parse_agy_usage(text)
@@ -484,15 +496,31 @@ def quota_summary(agent_ids: list[str] | tuple[str, ...] | None = None) -> list[
 
 
 def save_snapshot(results: list[QuotaResult], path=None):
+    """Write the snapshot, but never regress: if a probe just failed for an
+    agent that had good data last time, keep the previous entry (marked
+    stale) so a transient scrape miss doesn't blank the panel."""
     from .utils.paths import quota_snapshot_file
 
     p = path or quota_snapshot_file()
-    payload = {
-        "generated_at": time.time(),
-        "agents": {r.agent: r.to_dict() for r in results},
-    }
+    prev = load_snapshot(p).get("agents", {})
+    agents: dict[str, dict] = {}
+    for r in results:
+        cur = r.to_dict()
+        old = prev.get(r.agent)
+        if not r.available and old and old.get("available") and old.get("windows"):
+            old = dict(old)
+            old["note"] = (old.get("note") or "").split(" — last seen")[0]
+            when = time.strftime("%m-%d %H:%M", time.localtime(old.get("checked_at", time.time())))
+            old["note"] = f"{old['note']} — last seen {when}".strip(" —")
+            old["stale"] = True
+            agents[r.agent] = old
+        else:
+            agents[r.agent] = cur
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    p.write_text(
+        json.dumps({"generated_at": time.time(), "agents": agents}, indent=2),
+        encoding="utf-8",
+    )
     return p
 
 

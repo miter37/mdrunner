@@ -3,8 +3,12 @@
 
 Linux/macOS only (uses :mod:`pty`). Best-effort: any failure returns an
 empty string and the caller falls back to "unavailable". Nothing here runs
-model inference, so it consumes no usage quota — ``/usage`` is a local
-account read.
+model inference — ``/usage`` is a local account read.
+
+Steps are event-driven: a step waits for a marker to appear in the output
+(with a time cap) before sending its keystrokes, so a slow-starting TUI on
+a busy machine doesn't get typed at before it's ready. An optional
+``stop_when`` marker ends the capture as soon as the data is on screen.
 """
 
 from __future__ import annotations
@@ -14,10 +18,17 @@ import re
 import select
 import signal
 import time
+from typing import Optional, Union
 
 _ANSI_OSC = re.compile(r"\x1b\][0-9].*?(?:\x07|\x1b\\)", re.S)
 _ANSI_CSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _ANSI_OTHER = re.compile(r"\x1b[=>@-Z\\-_]")
+
+# A step's trigger: a float = "this many seconds after the previous step",
+# or ("await", regex, max_seconds) = "wait for regex, but no longer than
+# max_seconds after the previous step".
+Trigger = Union[float, tuple]
+Step = tuple[Trigger, str]
 
 
 def strip_ansi(s: str) -> str:
@@ -35,15 +46,14 @@ def capture_screen(
     argv: list[str],
     *,
     cwd: str,
-    script: list[tuple[float, str]],
-    total_seconds: float = 30.0,
+    steps: list[Step],
+    total_seconds: float = 40.0,
+    stop_when: Optional[str] = None,
     cols: int = 200,
     rows: int = 50,
 ) -> str:
-    """Spawn ``argv`` on a PTY, replay ``script`` (list of ``(delay, text)``,
-    text typed a keystroke at a time), collect output for ``total_seconds``,
-    then SIGTERM it. Returns the ANSI-stripped transcript ("" on failure).
-    """
+    """Spawn ``argv`` on a PTY, replay ``steps``, return the ANSI-stripped
+    transcript ("" on failure)."""
     if not supported():
         return ""
     try:
@@ -74,10 +84,21 @@ def capture_screen(
     except OSError:
         pass
 
+    stop_re = re.compile(stop_when) if stop_when else None
     raw = b""
+    text = ""
     start = time.time()
     idx = 0
-    pending = sorted(script, key=lambda x: x[0])
+    step_since = start  # when the current step became "pending"
+
+    def _send(s: str) -> None:
+        for ch in s:
+            try:
+                os.write(fd, ch.encode())
+            except OSError:
+                return
+            time.sleep(0.04)
+
     while time.time() - start < total_seconds:
         try:
             r, _, _ = select.select([fd], [], [], 0.2)
@@ -91,25 +112,36 @@ def capture_screen(
             if not chunk:
                 break
             raw += chunk
-        elapsed = time.time() - start
-        while idx < len(pending) and elapsed >= pending[idx][0]:
-            for ch in pending[idx][1]:
+            text = strip_ansi(raw.decode("utf-8", "replace"))
+            if stop_re and stop_re.search(text):
+                # give the screen a beat to finish painting, then done
+                time.sleep(0.6)
                 try:
-                    os.write(fd, ch.encode())
+                    raw += os.read(fd, 65536)
                 except OSError:
-                    break
-                time.sleep(0.04)
-            idx += 1
+                    pass
+                break
 
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    time.sleep(0.2)
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+        if idx < len(steps):
+            trig, payload = steps[idx]
+            waited = time.time() - step_since
+            fire = False
+            if isinstance(trig, (int, float)):
+                fire = waited >= trig
+            else:  # ("await", pattern, cap)
+                _, pattern, cap = trig
+                fire = bool(re.search(pattern, text)) or waited >= cap
+            if fire:
+                _send(payload)
+                idx += 1
+                step_since = time.time()
+
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            break
+        time.sleep(0.2)
     try:
         os.close(fd)
     except OSError:

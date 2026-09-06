@@ -652,11 +652,18 @@ class MainWindow(QMainWindow):
             agent = a.get("agent", "?")
             plan = a.get("plan")
             windows = a.get("windows") or []
+            stale = bool(a.get("stale"))
 
-            def agent_cell(first: bool):
-                c = cell(agent if first else "")
-                if first and plan:
-                    c.setToolTip(f"plan: {plan}")
+            def agent_cell(first: bool, _agent=agent, _plan=plan, _stale=stale, _a=a):
+                c = cell((_agent + (" *" if _stale else "")) if first else "")
+                if first:
+                    tip = f"plan: {_plan}" if _plan else ""
+                    if _stale:
+                        tip = (tip + "\n" if tip else "") + (_a.get("note") or "cached — last probe failed")
+                    if tip:
+                        c.setToolTip(tip)
+                    if _stale:
+                        c.setForeground(QColor(p["text_dim"]))
                 return c
 
             if not windows:
