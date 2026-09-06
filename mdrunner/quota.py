@@ -123,7 +123,8 @@ def _clock_to_resets_at(when: str, tz: str, *, now_dt: Optional[datetime] = None
             pass
     for fmt in ("%b %d, %I:%M%p", "%b %d, %I%p", "%b %d %I:%M%p", "%b %d %I%p"):
         try:
-            t = datetime.strptime(w, fmt)
+            # anchor a year so strptime doesn't warn / mis-handle leap day
+            t = datetime.strptime(f"{now_local.year} {w}", f"%Y {fmt}")
             cand = now_local.replace(
                 month=t.month, day=t.day, hour=t.hour, minute=t.minute,
                 second=0, microsecond=0,
@@ -156,8 +157,30 @@ def fmt_reset(seconds: Optional[float]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _probe_codex(binary: str, timeout: float = 20.0) -> QuotaResult:
+def _resolve_cli(binary: str) -> Optional[str]:
+    """resolve_binary(), plus well-known install dirs that a GUI/desktop
+    launch misses (nvm's node bins hold `codex`, `~/.local/bin` holds most)."""
     path = resolve_binary(binary)
+    if path:
+        return path
+    import glob
+    import os as _os
+
+    home = _os.path.expanduser("~")
+    candidates = [
+        *sorted(glob.glob(f"{home}/.nvm/versions/node/*/bin/{binary}")),
+        f"{home}/.local/bin/{binary}",
+        f"/usr/local/bin/{binary}",
+        f"/opt/homebrew/bin/{binary}",
+    ]
+    for c in candidates:
+        if _os.path.isfile(c) and _os.access(c, _os.X_OK):
+            return c
+    return None
+
+
+def _probe_codex(binary: str, timeout: float = 20.0) -> QuotaResult:
+    path = _resolve_cli(binary)
     if path is None:
         return QuotaResult("codex", False, error=f"binary {binary!r} not on PATH")
 
@@ -325,7 +348,7 @@ def _parse_claude_usage(text: str) -> list[QuotaWindow]:
 
 
 def _probe_claude(binary: str, timeout: float = 28.0) -> QuotaResult:
-    if resolve_binary(binary) is None:
+    if _resolve_cli(binary) is None:
         return QuotaResult("claude", False, error=f"binary {binary!r} not on PATH")
     from . import _ptyusage
 
@@ -394,7 +417,7 @@ def _parse_agy_usage(text: str, group: str = "GEMINI MODELS") -> list[QuotaWindo
 
 
 def _probe_agy(binary: str, timeout: float = 32.0) -> QuotaResult:
-    if resolve_binary(binary) is None:
+    if _resolve_cli(binary) is None:
         return QuotaResult("agy", False, error=f"binary {binary!r} not on PATH")
     from . import _ptyusage
 

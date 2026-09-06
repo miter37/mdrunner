@@ -13,6 +13,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Desktop launchers don't load the interactive shell profile, so nvm-installed
+# tools (notably `codex`) are missing from PATH. Prepend every node bin dir;
+# the newest version is globbed last and wins.
+NVM_NODE_ROOT="${NVM_DIR:-$HOME/.nvm}/versions/node"
+if [ -d "$NVM_NODE_ROOT" ]; then
+    for node_bin in "$NVM_NODE_ROOT"/*/bin; do
+        [ -d "$node_bin" ] && PATH="$node_bin:$PATH"
+    done
+    export PATH
+fi
+
 if command -v uv >/dev/null 2>&1; then
     # --extra gui pulls PySide6 into the project venv on first run.
     exec uv run --extra gui python -m mdrunner --gui "$@"
