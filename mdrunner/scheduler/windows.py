@@ -30,6 +30,11 @@ def _task_name(task_id: str) -> str:
 def _build_trigger(task: Task) -> tuple[list[str], str]:
     """Return (schtasks /create args for the trigger, human-readable summary)."""
     s = task.schedule
+    if s.mode == "quota":
+        raise ValueError(
+            "quota-triggered tasks have no OS calendar; "
+            "install the quota poll timer instead"
+        )
     common = ["/SC"]
     if s.mode == "once":
         today = _dt.date.today().strftime("%m/%d/%Y")
@@ -53,8 +58,12 @@ def _build_trigger(task: Task) -> tuple[list[str], str]:
 
 
 def _query_state(task_id: str) -> tuple[Optional[int], Optional[_dt.datetime], Optional[_dt.datetime]]:
-    """Parse `schtasks /query /xml` for a given task name. Returns (exit, last, next)."""
-    name = _task_name(task_id)
+    """Parse `schtasks /query /xml` for a given task id. Returns (exit, last, next)."""
+    return _query_named(_task_name(task_id))
+
+
+def _query_named(name: str) -> tuple[Optional[int], Optional[_dt.datetime], Optional[_dt.datetime]]:
+    """Parse `schtasks /query /xml` for a scheduled-task name."""
     try:
         r = subprocess.run(
             ["schtasks", "/query", "/tn", name, "/xml", "/fo", "LIST"],
@@ -98,7 +107,30 @@ def _parse_schtasks_dt(s: str) -> Optional[_dt.datetime]:
     return None
 
 
+_ISO_DUR = re.compile(
+    r"^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$",
+    re.I,
+)
+
+
+def _parse_repetition_minutes(xml: str) -> Optional[int]:
+    """Read the first ``<Interval>PTxx</Interval>`` out of schtasks XML."""
+    m = re.search(r"<Interval>\s*([^<]+?)\s*</Interval>", xml or "", re.I)
+    if not m:
+        return None
+    token = m.group(1).strip().upper().replace(" ", "")
+    dm = _ISO_DUR.fullmatch(token)
+    if not dm or not any(dm.groups()):
+        return None
+    days, hours, minutes, seconds = (int(x) if x else 0 for x in dm.groups())
+    return days * 1440 + hours * 60 + minutes + seconds // 60
+
+
 class WindowsScheduler:
+    # Full Task Scheduler name (hyphens are allowed; _task_name would
+    # turn "quota-poll" into "quota_poll"). Matches Linux unit naming.
+    QUOTA_TASK_NAME = "mdrunner-quota-poll"
+
     def install(self, task: Task, mdrunner_executable: Path) -> None:
         trigger_args, _summary = _build_trigger(task)
         name = _task_name(task.id)
@@ -137,3 +169,54 @@ class WindowsScheduler:
     def last_status(self, task: Task) -> tuple[Optional[int], Optional[_dt.datetime]]:
         exit_code, last, _next = _query_state(task.id)
         return exit_code, last
+
+    # --- quota poller (a single non-task scheduled task) ------------------
+
+    def install_quota_poll(self, interval_minutes: int, mdrunner_executable: Path) -> None:
+        # schtasks /SC MINUTE accepts 1–1439
+        interval = max(1, min(int(interval_minutes), 1439))
+        name = self.QUOTA_TASK_NAME
+        tr = f'"{mdrunner_executable}" quota-tick'
+        cmd = [
+            "schtasks", "/create",
+            "/TN", name,
+            "/TR", tr,
+            "/SC", "MINUTE",
+            "/MO", str(interval),
+            "/F",
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"schtasks failed: {r.stderr.strip() or r.stdout.strip()}")
+
+    def uninstall_quota_poll(self) -> None:
+        subprocess.run(
+            ["schtasks", "/delete", "/tn", self.QUOTA_TASK_NAME, "/F"],
+            check=False, capture_output=True,
+        )
+
+    def quota_poll_installed(self) -> bool:
+        try:
+            r = subprocess.run(
+                ["schtasks", "/query", "/tn", self.QUOTA_TASK_NAME],
+                capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:
+            return False
+        return r.returncode == 0
+
+    def quota_poll_interval_minutes(self) -> Optional[int]:
+        try:
+            r = subprocess.run(
+                ["schtasks", "/query", "/tn", self.QUOTA_TASK_NAME, "/xml", "/fo", "LIST"],
+                capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:
+            return None
+        if r.returncode != 0:
+            return None
+        return _parse_repetition_minutes(r.stdout)
+
+    def quota_poll_next_run(self) -> Optional[_dt.datetime]:
+        _exit, _last, nxt = _query_named(self.QUOTA_TASK_NAME)
+        return nxt

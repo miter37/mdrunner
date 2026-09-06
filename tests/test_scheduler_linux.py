@@ -56,3 +56,11 @@ def test_timezone_line_emitted_for_calendar_modes():
     )
     # a bare word (not an IANA name) is not emitted
     assert _format_oncalendar(_task(mode="daily", time="07:00", timezone="local"))[1] == ""
+
+
+def test_quota_mode_is_not_installed_as_a_weekly_timer():
+    """quota-triggered tasks have no OnCalendar — they run via quota-tick."""
+    import pytest
+
+    with pytest.raises(ValueError, match="quota"):
+        _format_oncalendar(_task(mode="quota"))

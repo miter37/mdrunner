@@ -254,6 +254,8 @@ One entry per task. Key fields:
 | `extra_args` | Free-form list passed to the agent CLI |
 | `timeout_minutes` | `0` = no timeout |
 | `on_failure.notify` | Send a Telegram message on failure (bot must be configured) |
+| `notify_artifact` | On success, send result files via Telegram |
+| `notify_final_message` | On success, send the agent's last user-facing reply via Telegram (best-effort extract from stdout) |
 
 ### Quota-conditional execution
 
@@ -269,16 +271,17 @@ A task can be tied to its own agent's quota usage. Two shapes:
 
 `quota_condition` is a 2×2 grid — `{weekly, 5-hour} × {used %, resets within N
 hours}`. Each clause has its own `enabled` flag and **only the enabled clauses
-are AND-ed**. Operators are fixed: `used` means "≥ this percent", `reset` means
-"the window refreshes in ≤ this many hours" (all durations in hours).
+are AND-ed**. Each `used` clause picks its own operator via `op`: `gte`
+(default) means "≥ this percent", `lte` means "≤ this percent". `reset` always
+means "the window refreshes in ≤ this many hours" (all durations in hours).
 
 ```yaml
 quota_condition:
-  weekly_used:    {enabled: true,  value: 90}   # weekly usage ≥ 90%
-  weekly_reset:   {enabled: false, value: 24}   # weekly window refreshes within 24h
-  fivehour_used:  {enabled: true,  value: 90}   # 5-hour usage ≥ 90%
-  fivehour_reset: {enabled: false, value: 3}    # 5-hour window refreshes within 3h
-  on_unknown: skip                              # skip | run — when the quota can't be read
+  weekly_used:    {enabled: true,  value: 90, op: gte}   # weekly usage ≥ 90%
+  weekly_reset:   {enabled: false, value: 24}            # weekly window refreshes within 24h
+  fivehour_used:  {enabled: true,  value: 20, op: lte}   # 5-hour usage ≤ 20%
+  fivehour_reset: {enabled: false, value: 3}             # 5-hour window refreshes within 3h
+  on_unknown: skip                                       # skip | run — when the quota can't be read
 ```
 
 At least one clause must be enabled. The condition's agent is always the task's
@@ -296,7 +299,7 @@ window, % used, and time until reset.
 ```bash
 mdrunner quota                    # table
 mdrunner quota --json --write     # machine-readable + save snapshot for the GUI
-mdrunner quota-schedule install   # systemd user timer (interval from settings.yaml)
+mdrunner quota-schedule install   # OS timer: systemd / launchd / Task Scheduler
 mdrunner quota-schedule status
 mdrunner quota-schedule uninstall
 ```

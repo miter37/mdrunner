@@ -77,3 +77,16 @@ def test_current_returns_mac_on_darwin(monkeypatch):
 
     monkeypatch.setattr(base.sys, "platform", "darwin")
     assert isinstance(base.current(), macos.MacScheduler)
+
+
+def test_quota_mode_plist_is_not_a_weekly_calendar():
+    import pytest
+    from pathlib import Path
+
+    with pytest.raises(ValueError, match="quota"):
+        macos._build_plist(
+            "com.mdrunner.q",
+            ["/bin/mdrunner", "run", "q", "--mode", "scheduled"],
+            _task(mode="quota"),
+            Path("/tmp/q.log"),
+        )

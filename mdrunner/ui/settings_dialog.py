@@ -460,7 +460,7 @@ class SettingsDialog(QDialog):
         self.in_artifact_window.setValue(self.settings.defaults.artifact_time_window_seconds)
         f.addRow("Result Time Window", self.in_artifact_window)
 
-        # --- Quota polling (systemd timer that runs `mdrunner quota-tick`) ---
+        # --- Quota polling (OS timer that runs `mdrunner quota-tick`) ---
         qp = getattr(self.settings, "quota_poll", None)
         self.in_quota_enabled = QCheckBox("Poll agent quota on a timer", w)
         self.in_quota_enabled.setChecked(bool(qp and qp.enabled))
@@ -505,8 +505,8 @@ class SettingsDialog(QDialog):
         return w
 
     def _apply_quota_timer(self, qp) -> None:
-        """Install / remove the periodic quota-poll OS timer (systemd on
-        Linux, launchd on macOS; unsupported elsewhere)."""
+        """Install / remove the periodic quota-poll OS timer (systemd /
+        launchd / Task Scheduler)."""
         try:
             from ..cli import _mdrunner_executable_for_scheduler
             from ..scheduler.base import current
@@ -568,7 +568,7 @@ class SettingsDialog(QDialog):
             artifact_time_window_seconds=self.in_artifact_window.value(),
         )
 
-        # Quota polling — persist the setting and (un)install the systemd timer.
+        # Quota polling — persist the setting and (un)install the OS timer.
         from ..config import QuotaPoll
 
         qp_prev = getattr(self.settings, "quota_poll", QuotaPoll())

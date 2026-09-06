@@ -511,6 +511,7 @@ class MainWindow(QMainWindow):
             return
         task.enabled = not task.enabled
         save_tasks(tasks_file(), self.tasks)
+        self._install_schedule_for(task)
         self.refresh_table()
         self.status_msg.setText(
             f"{'Enabled' if task.enabled else 'Disabled'} '{task.name}'"

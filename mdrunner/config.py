@@ -11,6 +11,8 @@ trivially serializable so the GUI can round-trip them through PyYAML.
 
 from __future__ import annotations
 
+import datetime as _dt
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -33,13 +35,31 @@ QUOTA_CAPABLE_AGENTS = {"claude", "codex", "agy", "grok"}
 # Agents that report a rolling 5-hour window (grok only reports weekly).
 FIVE_HOUR_AGENTS = {"claude", "codex", "agy"}
 VALID_ON_UNKNOWN = {"skip", "run"}
+_TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?$")
 
 
 def _schedule_time_from_yaml(value: Any) -> str:
-    """Normalize PyYAML's legacy sexagesimal parsing for unquoted HH:MM."""
-    if isinstance(value, int) and 60 <= value < 24 * 60:
+    """Normalize PyYAML's legacy sexagesimal parsing for unquoted HH:MM.
+
+    Unquoted ``14:14`` becomes int 854; unquoted ``0:30`` becomes int 30.
+    ``07:25:00`` (string or datetime.time) is folded to ``07:25``.
+    """
+    if isinstance(value, _dt.time):
+        return f"{value.hour:02d}:{value.minute:02d}"
+    if isinstance(value, _dt.timedelta):
+        value = int(value.total_seconds()) // 60
+    if isinstance(value, float) and value == int(value):
+        value = int(value)
+    if isinstance(value, int) and 0 <= value < 24 * 60:
         return f"{value // 60:02d}:{value % 60:02d}"
-    return str(value)
+    text = str(value).strip()
+    m = _TIME_RE.match(text)
+    if not m:
+        return text
+    hour, minute = int(m.group(1)), int(m.group(2))
+    if hour > 23 or minute > 59:
+        return text
+    return f"{hour:02d}:{minute:02d}"
 
 
 @dataclass
@@ -72,10 +92,22 @@ class QuotaClause:
 
     ``value`` is a percent for the ``*_used`` clauses and a number of hours
     for the ``*_reset`` clauses.
+
+    ``op`` picks the comparison for the ``*_used`` clauses: ``"gte"`` runs
+    when ``used_percent >= value`` (the default), ``"lte"`` when
+    ``used_percent <= value``. It is ignored for the ``*_reset`` clauses,
+    which always compare ``<=`` a number of hours.
     """
 
     enabled: bool = False
     value: float = 0.0
+    op: str = "gte"
+
+
+VALID_QUOTA_OPS = ("gte", "lte")
+
+# how each op renders in labels / describe()
+_QUOTA_OP_SYMBOL = {"gte": "≥", "lte": "≤"}
 
 
 # (attr, window label, kind, short label) for every grid cell, in UI order.
@@ -93,8 +125,9 @@ class QuotaCondition:
 
     A 2x2 grid — {weekly, 5-hour} x {used %, resets within N hours}. Only
     the enabled clauses are AND-ed. The agent is always ``task.agent``.
-    Operators are fixed: ``used`` is ``>=`` a percent, ``reset`` is ``<=``
-    a number of hours until the window refreshes.
+    Each ``used`` clause carries its own operator (``>=`` or ``<=`` the
+    percent, per ``QuotaClause.op``); ``reset`` is always ``<=`` a number
+    of hours until the window refreshes.
     """
 
     weekly_used: QuotaClause = field(default_factory=lambda: QuotaClause(False, 90.0))
@@ -103,13 +136,18 @@ class QuotaCondition:
     fivehour_reset: QuotaClause = field(default_factory=lambda: QuotaClause(False, 3.0))
     on_unknown: str = "skip"     # skip | run  (when quota can't be read)
 
-    def active(self) -> list[tuple[str, str, str, float]]:
-        """[(short label, window, kind, value), ...] for the enabled clauses."""
+    def active(self) -> list[tuple[str, str, str, float, str]]:
+        """[(short label, window, kind, value, op), ...] for the enabled clauses.
+
+        ``op`` is ``"gte"``/``"lte"`` for ``used`` clauses and always
+        ``"lte"`` for ``reset`` clauses (whose comparison is fixed).
+        """
         out = []
         for attr, window, kind, label in QUOTA_CLAUSES:
             clause: QuotaClause = getattr(self, attr)
             if clause.enabled:
-                out.append((label, window, kind, clause.value))
+                op = clause.op if kind == "used" else "lte"
+                out.append((label, window, kind, clause.value, op))
         return out
 
     def uses_five_hour(self) -> bool:
@@ -117,8 +155,8 @@ class QuotaCondition:
 
     def describe(self, agent: str) -> str:
         parts = [
-            f"{label}{'≥' if kind == 'used' else '≤'}{value:g}{'%' if kind == 'used' else 'h'}"
-            for label, _w, kind, value in self.active()
+            f"{label}{_QUOTA_OP_SYMBOL.get(op, '≥')}{value:g}{'%' if kind == 'used' else 'h'}"
+            for label, _w, kind, value, op in self.active()
         ]
         return f"{agent}: " + (" & ".join(parts) if parts else "(no clause)")
 
@@ -137,6 +175,7 @@ class Task:
     timeout_minutes: int = 10
     on_failure: OnFailure = field(default_factory=OnFailure)
     notify_artifact: bool = False
+    notify_final_message: bool = False
     artifact_dir: str | None = None
     artifact_extensions: list[str] = field(default_factory=lambda: [".md"])
     min_rerun_interval: MinRerunInterval = field(default_factory=MinRerunInterval)
@@ -156,6 +195,14 @@ def _clause_from_dict(raw: Any, task_id: str, attr: str, kind: str) -> QuotaClau
             f"task '{task_id}': quota_condition.{attr}.value must be a number"
         ) from None
     enabled = bool(raw.get("enabled", False))
+    op = str(raw.get("op", "gte")).lower()
+    if op not in VALID_QUOTA_OPS:
+        raise ConfigError(
+            f"task '{task_id}': quota_condition.{attr}.op must be one of "
+            f"{', '.join(VALID_QUOTA_OPS)} (got {raw.get('op')!r})"
+        )
+    if kind == "reset":
+        op = "gte"  # not applicable — reset always compares <= hours
     if enabled and kind == "used" and not 0.0 <= value <= 100.0:
         raise ConfigError(
             f"task '{task_id}': quota_condition.{attr}.value {value} out of range 0–100"
@@ -164,7 +211,7 @@ def _clause_from_dict(raw: Any, task_id: str, attr: str, kind: str) -> QuotaClau
         raise ConfigError(
             f"task '{task_id}': quota_condition.{attr}.value must be > 0 hours (got {value})"
         )
-    return QuotaClause(enabled, value)
+    return QuotaClause(enabled, value, op)
 
 
 def _quota_condition_from_dict(
@@ -232,9 +279,13 @@ def task_from_dict(data: dict[str, Any]) -> Task:
     sched_data = data.get("schedule") or {}
     if not isinstance(sched_data, dict):
         raise ConfigError(f"task.schedule must be a mapping (got {type(sched_data).__name__})")
+    if "days" in sched_data:
+        days = [str(d).lower() for d in (sched_data.get("days") or [])]
+    else:
+        days = ["mon", "tue", "wed", "thu", "fri"]
     schedule = Schedule(
         mode=str(sched_data.get("mode", "weekly")),
-        days=[str(d).lower() for d in sched_data.get("days", [])],
+        days=days,
         time=_schedule_time_from_yaml(sched_data.get("time", "07:00")),
         timezone=str(sched_data.get("timezone", "Asia/Seoul")),
         interval_minutes=int(sched_data.get("interval_minutes", 60)),
@@ -243,12 +294,28 @@ def task_from_dict(data: dict[str, Any]) -> Task:
         raise ConfigError(
             f"task '{data['id']}' has invalid schedule.mode={schedule.mode!r}"
         )
+    # After normalization a valid time is always HH:MM. Anything else is junk
+    # (e.g. YAML ``24:00`` → 1440, or a bare ``25:00``).
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", schedule.time):
+        raise ConfigError(
+            f"task '{data['id']}' has invalid schedule.time {schedule.time!r} "
+            f"(use HH:MM, 00:00–23:59)"
+        )
     if schedule.mode == "weekly":
+        if not schedule.days:
+            raise ConfigError(
+                f"task '{data['id']}' weekly schedule needs at least one weekday"
+            )
         for d in schedule.days:
             if d not in VALID_WEEKDAYS:
                 raise ConfigError(
                     f"task '{data['id']}' has invalid weekday {d!r}"
                 )
+    if schedule.mode == "interval" and schedule.interval_minutes < 1:
+        raise ConfigError(
+            f"task '{data['id']}' schedule.interval_minutes must be >= 1 "
+            f"(got {schedule.interval_minutes})"
+        )
     on_fail_data = data.get("on_failure") or {}
     on_failure = OnFailure(
         notify=bool(on_fail_data.get("notify", False)),
@@ -297,6 +364,7 @@ def task_from_dict(data: dict[str, Any]) -> Task:
         timeout_minutes=int(data.get("timeout_minutes", 10)),
         on_failure=on_failure,
         notify_artifact=bool(data.get("notify_artifact", False)),
+        notify_final_message=bool(data.get("notify_final_message", False)),
         artifact_dir=(str(data["artifact_dir"]) if data.get("artifact_dir") else None),
         artifact_extensions=[str(x) for x in data.get("artifact_extensions", [".md"])],
         min_rerun_interval=min_rerun,
@@ -324,6 +392,7 @@ def task_to_dict(task: Task) -> dict[str, Any]:
         "timeout_minutes": task.timeout_minutes,
         "on_failure": {"notify": task.on_failure.notify},
         "notify_artifact": task.notify_artifact,
+        "notify_final_message": task.notify_final_message,
         "artifact_dir": task.artifact_dir,
         "artifact_extensions": task.artifact_extensions,
         "min_rerun_interval": {
@@ -338,9 +407,12 @@ def task_to_dict(task: Task) -> dict[str, Any]:
 
 def _quota_condition_to_dict(c: QuotaCondition) -> dict[str, Any]:
     out: dict[str, Any] = {"on_unknown": c.on_unknown}
-    for attr, _window, _kind, _label in QUOTA_CLAUSES:
+    for attr, _window, kind, _label in QUOTA_CLAUSES:
         clause: QuotaClause = getattr(c, attr)
-        out[attr] = {"enabled": clause.enabled, "value": clause.value}
+        cell: dict[str, Any] = {"enabled": clause.enabled, "value": clause.value}
+        if kind == "used":
+            cell["op"] = clause.op
+        out[attr] = cell
     return out
 
 

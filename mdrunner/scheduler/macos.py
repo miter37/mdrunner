@@ -48,9 +48,9 @@ def _plist_path(label: str) -> Path:
 
 def _hhmm(t: str) -> tuple[int, int]:
     try:
-        h, m = t.split(":")
-        return int(h), int(m)
-    except (ValueError, AttributeError):
+        parts = str(t).split(":")
+        return int(parts[0]), int(parts[1])
+    except (ValueError, AttributeError, IndexError):
         return 7, 0
 
 
@@ -77,6 +77,11 @@ def _harvest_path() -> str:
 
 def _calendar_intervals(task: Task):
     s = task.schedule
+    if s.mode == "quota":
+        raise ValueError(
+            "quota-triggered tasks have no OS calendar; "
+            "install the quota poll timer instead"
+        )
     h, m = _hhmm(s.time)
     if s.mode == "daily":
         return {"Hour": h, "Minute": m}
@@ -98,6 +103,11 @@ def _build_plist(label: str, argv: list[str], task: Task, log_path: Path) -> dic
         "StandardErrorPath": str(log_path),
         "ProcessType": "Background",
     }
+    if task.schedule.mode == "quota":
+        raise ValueError(
+            "quota-triggered tasks have no OS calendar; "
+            "install the quota poll timer instead"
+        )
     if task.schedule.mode == "interval":
         p["StartInterval"] = max(60, int(task.schedule.interval_minutes) * 60)
     else:

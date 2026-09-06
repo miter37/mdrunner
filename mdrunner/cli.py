@@ -52,15 +52,16 @@ def cmd_list(args: argparse.Namespace) -> int:
     print(f"{'ID':<28} {'AGENT':<12} {'ENABLED':<8} {'SCHEDULE':<28} NAME")
     print("-" * 110)
     for t in tasks:
-        sched = (
-            "once"
-            if t.schedule.mode == "once"
-            else f"{t.schedule.mode}:{','.join(t.schedule.days)}@{t.schedule.time}"
-            if t.schedule.mode == "weekly"
-            else f"every {t.schedule.interval_minutes}m"
-            if t.schedule.mode == "interval"
-            else f"daily@{t.schedule.time}"
-        )
+        if t.schedule.mode == "once":
+            sched = "once"
+        elif t.schedule.mode == "weekly":
+            sched = f"weekly:{','.join(t.schedule.days)}@{t.schedule.time}"
+        elif t.schedule.mode == "interval":
+            sched = f"every {t.schedule.interval_minutes}m"
+        elif t.schedule.mode == "quota":
+            sched = "quota"
+        else:
+            sched = f"daily@{t.schedule.time}"
         enabled = "yes" if t.enabled else "no"
         agent_ok = t.agent in settings.agents
         agent_mark = t.agent if agent_ok else f"{t.agent}(!)"
@@ -632,7 +633,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_qtick.set_defaults(func=cmd_quota_tick)
 
     p_qsched = sub.add_parser(
-        "quota-schedule", help="install/remove the periodic quota-poll systemd timer"
+        "quota-schedule", help="install/remove the periodic quota-poll OS timer"
     )
     p_qsched.add_argument(
         "action", choices=("install", "uninstall", "status"), help="what to do"

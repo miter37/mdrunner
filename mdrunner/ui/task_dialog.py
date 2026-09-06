@@ -282,8 +282,8 @@ class TaskDialog(QDialog):
         self.in_time.setDisplayFormat("HH:mm")
         if task:
             try:
-                hh, mm = task.schedule.time.split(":")
-                self.in_time.setTime(QTime(int(hh), int(mm)))
+                parts = task.schedule.time.split(":")
+                self.in_time.setTime(QTime(int(parts[0]), int(parts[1])))
             except Exception:  # noqa: BLE001
                 self.in_time.setTime(QTime(7, 0))
         else:
@@ -343,26 +343,34 @@ class TaskDialog(QDialog):
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(4)
-        grid.addWidget(QLabel("used ≥", grid_w), 0, 1)
+        grid.addWidget(QLabel("used", grid_w), 0, 1)
         grid.addWidget(QLabel("resets within", grid_w), 0, 2)
         grid.addWidget(QLabel("weekly", grid_w), 1, 0)
         grid.addWidget(QLabel("5-hour", grid_w), 2, 0)
         _row = {"weekly": 1, "5h": 2}
         _col = {"used": 1, "reset": 2}
         self.qc_cells: dict[str, tuple[QCheckBox, QSpinBox]] = {}
+        # per-`used`-clause comparison operator (≥ / ≤); reset clauses have none.
+        self.qc_ops: dict[str, QComboBox] = {}
         for attr, window, kind, _label in QUOTA_CLAUSES:
             cb = QCheckBox(grid_w)
             sb = QSpinBox(grid_w)
+            op_combo: QComboBox | None = None
             if kind == "used":
                 sb.setRange(0, 100)
                 sb.setSuffix(" %")
+                op_combo = QComboBox(grid_w)
+                op_combo.addItem("≥", "gte")
+                op_combo.addItem("≤", "lte")
             else:
                 sb.setRange(1, 24 * 14)  # hours, up to ~2 weeks
                 sb.setSuffix(" h")
             if qc:
                 clause: QuotaClause = getattr(qc, attr)
                 cb.setChecked(clause.enabled)
-                sb.setValue(int(clause.value) or _QC_DEFAULTS[attr])
+                sb.setValue(int(clause.value))
+                if op_combo is not None:
+                    op_combo.setCurrentIndex(max(0, op_combo.findData(clause.op)))
             else:
                 sb.setValue(_QC_DEFAULTS[attr])
             cell = QWidget(grid_w)
@@ -370,6 +378,9 @@ class TaskDialog(QDialog):
             ch.setContentsMargins(0, 0, 0, 0)
             ch.setSpacing(4)
             ch.addWidget(cb)
+            if op_combo is not None:
+                ch.addWidget(op_combo)
+                self.qc_ops[attr] = op_combo
             ch.addWidget(sb)
             ch.addStretch(1)
             grid.addWidget(cell, _row[window], _col[kind])
@@ -406,6 +417,13 @@ class TaskDialog(QDialog):
         if task:
             self.in_notify_artifact.setChecked(task.notify_artifact)
         fn.addRow("", self.in_notify_artifact)
+
+        self.in_notify_final = QCheckBox(
+            "성공 시 에이전트 최종 메시지 전송 (Final reply)", gb_notify
+        )
+        if task:
+            self.in_notify_final.setChecked(task.notify_final_message)
+        fn.addRow("", self.in_notify_final)
 
         self.in_artifact_dir = QLineEdit(gb_notify)
         self.in_artifact_dir.setPlaceholderText("(선택 사항) 결과물이 저장될 폴더 경로")
@@ -611,6 +629,9 @@ class TaskDialog(QDialog):
                 cb.blockSignals(False)
             cb.setEnabled(row_ok)
             sb.setEnabled(row_ok and cb.isChecked())
+            op_combo = self.qc_ops.get(attr)
+            if op_combo is not None:
+                op_combo.setEnabled(row_ok and cb.isChecked())
         self.in_qc_on_unknown.setEnabled(on)
 
         if not capable:
@@ -682,6 +703,7 @@ class TaskDialog(QDialog):
             cb.setChecked(code in ("mon", "tue", "wed", "thu", "fri"))
         self.in_notify_fail.setChecked(False)
         self.in_notify_artifact.setChecked(False)
+        self.in_notify_final.setChecked(False)
         self.in_artifact_dir.clear()
         self.in_artifact_ext.setText(".md")
         self.in_mrr_enabled.setChecked(True)
@@ -690,6 +712,8 @@ class TaskDialog(QDialog):
         for attr, (cb, sb) in self.qc_cells.items():
             cb.setChecked(False)
             sb.setValue(_QC_DEFAULTS[attr])
+        for op_combo in self.qc_ops.values():
+            op_combo.setCurrentIndex(0)  # back to ≥
         self.in_qc_on_unknown.setCurrentIndex(0)
         self._refresh_quota_condition_ui()
         self._refresh_preview()
@@ -764,6 +788,14 @@ class TaskDialog(QDialog):
         agent = self.in_agent.currentText()
         qc_on = self.in_qc_enabled.isChecked()
 
+        if mode == "weekly" and not any(cb.isChecked() for cb in self.day_checks.values()):
+            QMessageBox.warning(
+                self,
+                "No weekdays selected",
+                "Weekly mode needs at least one weekday, or pick daily / interval / quota.",
+            )
+            return
+
         if qc_on and agent not in QUOTA_CAPABLE_AGENTS:
             QMessageBox.warning(
                 self,
@@ -801,7 +833,11 @@ class TaskDialog(QDialog):
                 cb, sb = self.qc_cells[attr]
                 enabled = cb.isChecked() and cb.isEnabled()
                 any_checked = any_checked or enabled
-                clauses[attr] = QuotaClause(enabled=enabled, value=float(sb.value()))
+                op_combo = self.qc_ops.get(attr)
+                op = op_combo.currentData() if op_combo is not None else "gte"
+                clauses[attr] = QuotaClause(
+                    enabled=enabled, value=float(sb.value()), op=op or "gte"
+                )
             if not any_checked:
                 QMessageBox.warning(
                     self,
@@ -865,6 +901,7 @@ class TaskDialog(QDialog):
             timeout_minutes=self.in_timeout.value(),
             on_failure=OnFailure(notify=self.in_notify_fail.isChecked()),
             notify_artifact=self.in_notify_artifact.isChecked(),
+            notify_final_message=self.in_notify_final.isChecked(),
             artifact_dir=self.in_artifact_dir.text().strip() or None,
             artifact_extensions=ext_list,
             min_rerun_interval=min_rerun,

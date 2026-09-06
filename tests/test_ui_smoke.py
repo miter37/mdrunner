@@ -181,6 +181,7 @@ def test_task_dialog_notifications_integration(app_and_window) -> None:
         schedule=Schedule(),
         on_failure=OnFailure(notify=True),
         notify_artifact=True,
+        notify_final_message=True,
         artifact_dir="/tmp/artifacts",
         artifact_extensions=[".png", ".pdf"],
     )
@@ -190,6 +191,7 @@ def test_task_dialog_notifications_integration(app_and_window) -> None:
     # Verify initial population
     assert dlg.in_notify_fail.isChecked() is True
     assert dlg.in_notify_artifact.isChecked() is True
+    assert dlg.in_notify_final.isChecked() is True
     assert dlg.in_artifact_dir.text() == "/tmp/artifacts"
     assert dlg.in_artifact_ext.text() == ".png, .pdf"
 
@@ -217,6 +219,7 @@ def test_task_dialog_notifications_integration(app_and_window) -> None:
 
     assert saved_task.on_failure.notify is False
     assert saved_task.notify_artifact is True
+    assert saved_task.notify_final_message is True
     assert saved_task.artifact_dir == "/tmp/new_artifacts"
     assert saved_task.artifact_extensions == [".md", ".html"]
 
@@ -664,10 +667,13 @@ def test_task_dialog_quota_condition_saves_and_reloads(app_and_window) -> None:
     wk_reset_cb, wk_reset_sb = dlg.qc_cells["weekly_reset"]
     wk_used_cb.setChecked(True)
     wk_used_sb.setValue(85)
+    dlg.qc_ops["weekly_used"].setCurrentIndex(
+        dlg.qc_ops["weekly_used"].findData("lte")
+    )
     wk_reset_cb.setChecked(True)
     wk_reset_sb.setValue(12)
     dlg.in_prompt_source.setCurrentIndex(dlg.in_prompt_source.findData("inline"))
-    dlg.in_prompt_editor.setPlainText("Do the thing when weekly quota is high.")
+    dlg.in_prompt_editor.setPlainText("Do the thing when weekly quota is low.")
     dlg._on_accept()
 
     saved = next(t for t in load_tasks(tasks_file()) if t.name == "Quota Trigger Demo")
@@ -675,6 +681,7 @@ def test_task_dialog_quota_condition_saves_and_reloads(app_and_window) -> None:
     c = saved.quota_condition
     assert c is not None
     assert c.weekly_used.enabled and c.weekly_used.value == 85.0
+    assert c.weekly_used.op == "lte"
     assert c.weekly_reset.enabled and c.weekly_reset.value == 12.0
     assert not c.fivehour_used.enabled
     assert saved.min_rerun_interval.enabled is True
@@ -683,6 +690,7 @@ def test_task_dialog_quota_condition_saves_and_reloads(app_and_window) -> None:
     assert dlg2.in_qc_enabled.isChecked()
     cb2, sb2 = dlg2.qc_cells["weekly_used"]
     assert cb2.isChecked() and sb2.value() == 85
+    assert dlg2.qc_ops["weekly_used"].currentData() == "lte"
     dlg.deleteLater()
     dlg2.deleteLater()
 
@@ -803,3 +811,97 @@ def test_main_table_shows_quota_condition_tag(app_and_window) -> None:
     assert "codex: wk used≥90%" in texts["Gated daily"]
     assert "daily" in texts["Gated daily"]
     assert texts["Pure trigger"].startswith("codex: 5h resets≤3h")
+
+
+@pytest.mark.gui
+def test_task_dialog_used_zero_percent_roundtrips(app_and_window) -> None:
+    """used ≥ 0% is valid and must not be rewritten to the 90% default."""
+    from mdrunner.config import QuotaClause, QuotaCondition, Schedule, Task
+    from mdrunner.ui.task_dialog import TaskDialog
+    from mdrunner.utils.paths import settings_file
+
+    _seed_quota_settings()
+    win = app_and_window[1]
+    win.refresh_all()
+    prompt = settings_file().parent / "z.md"
+    prompt.write_text("x", encoding="utf-8")
+    task = Task(
+        id="zero_pct",
+        name="Zero",
+        agent="codex",
+        prompt_file=str(prompt),
+        schedule=Schedule(mode="daily", time="02:00"),
+        quota_condition=QuotaCondition(
+            weekly_used=QuotaClause(enabled=True, value=0.0),
+        ),
+    )
+    dlg = TaskDialog(parent=win, settings=win.settings, task=task)
+    cb, sb = dlg.qc_cells["weekly_used"]
+    assert cb.isChecked()
+    assert sb.value() == 0
+    dlg.deleteLater()
+
+
+@pytest.mark.gui
+def test_task_dialog_rejects_weekly_with_no_days(app_and_window, monkeypatch) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    from mdrunner.config import load_tasks
+    from mdrunner.ui.task_dialog import TaskDialog
+    from mdrunner.utils.paths import tasks_file
+
+    _seed_quota_settings()
+    win = app_and_window[1]
+    win.refresh_all()
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    dlg = TaskDialog(parent=win, settings=win.settings, task=None)
+    dlg.in_name.setText("No Days")
+    dlg.in_agent.setCurrentText("opencode")
+    dlg.in_mode.setCurrentIndex(dlg.in_mode.findData("weekly"))
+    for cb in dlg.day_checks.values():
+        cb.setChecked(False)
+    dlg.in_prompt_source.setCurrentIndex(dlg.in_prompt_source.findData("inline"))
+    dlg.in_prompt_editor.setPlainText("body")
+    dlg._on_accept()
+    assert not any(t.name == "No Days" for t in load_tasks(tasks_file()))
+    dlg.deleteLater()
+
+
+@pytest.mark.gui
+def test_toggle_disabled_updates_os_schedule(app_and_window, monkeypatch) -> None:
+    """Enable/disable must install/uninstall the OS timer, not just flip YAML."""
+    from unittest.mock import MagicMock
+
+    import yaml
+
+    from mdrunner.utils.paths import tasks_file
+
+    _seed_quota_settings()
+    tasks_file().write_text(
+        yaml.safe_dump(
+            {
+                "tasks": [
+                    {
+                        "id": "daily1",
+                        "name": "Daily",
+                        "agent": "opencode",
+                        "prompt_file": "/tmp/x.md",
+                        "schedule": {"mode": "daily", "time": "07:00"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake = MagicMock()
+    fake.next_run.return_value = None
+    fake.is_installed.return_value = False
+    monkeypatch.setattr("mdrunner.ui.main_window.current_scheduler", lambda: fake)
+    win = app_and_window[1]
+    win.refresh_all()
+    win.table.selectRow(0)
+    win._on_toggle()  # enabled True -> False: uninstall
+    fake.uninstall.assert_called()
+    win.table.selectRow(0)
+    win._on_toggle()  # False -> True: install
+    fake.install.assert_called()

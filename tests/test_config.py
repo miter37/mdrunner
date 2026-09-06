@@ -160,6 +160,7 @@ def test_artifact_config_roundtrip(tmp_path: Path) -> None:
     }
     t_def = task_from_dict(task_default_raw)
     assert t_def.notify_artifact is False
+    assert t_def.notify_final_message is False
     assert t_def.artifact_dir is None
     assert t_def.artifact_extensions == [".md"]
 
@@ -231,6 +232,28 @@ def test_quota_condition_roundtrip() -> None:
     assert not c.weekly_reset.enabled and not c.fivehour_used.enabled
     assert c.describe("codex") == "codex: wk used≥90% & 5h resets≤3h"
     assert task_from_dict(task_to_dict(t)) == t
+
+
+def test_quota_condition_used_op_lte_roundtrips_and_describes() -> None:
+    raw = _qc_task_raw()
+    raw["quota_condition"]["weekly_used"] = {"enabled": True, "value": 20, "op": "lte"}
+    t = task_from_dict(raw)
+    c = t.quota_condition
+    assert c.weekly_used.op == "lte"
+    assert c.describe("codex") == "codex: wk used≤20% & 5h resets≤3h"
+    assert task_from_dict(task_to_dict(t)) == t
+
+
+def test_quota_condition_used_op_defaults_to_gte() -> None:
+    t = task_from_dict(_qc_task_raw())
+    assert t.quota_condition.weekly_used.op == "gte"
+
+
+def test_quota_condition_rejects_bad_used_op() -> None:
+    raw = _qc_task_raw()
+    raw["quota_condition"]["weekly_used"] = {"enabled": True, "value": 90, "op": "近い"}
+    with pytest.raises(ConfigError):
+        task_from_dict(raw)
 
 
 def test_quota_condition_rejects_non_capable_agent() -> None:
@@ -328,3 +351,51 @@ def test_min_rerun_rejects_non_positive_hours() -> None:
         task_from_dict({"id": "d", "name": "D", "min_rerun_interval": {"hours": 0}})
     with pytest.raises(ConfigError):
         task_from_dict({"id": "d", "name": "D", "min_rerun_interval": {"hours": -3}})
+
+
+def test_weekly_empty_days_rejected() -> None:
+    with pytest.raises(ConfigError, match="weekday"):
+        task_from_dict(
+            {
+                "id": "x",
+                "name": "x",
+                "schedule": {"mode": "weekly", "days": [], "time": "08:00"},
+            }
+        )
+
+
+def test_invalid_schedule_time_rejected() -> None:
+    with pytest.raises(ConfigError, match="time"):
+        task_from_dict(
+            {"id": "x", "name": "x", "schedule": {"mode": "daily", "time": "25:00"}}
+        )
+    with pytest.raises(ConfigError, match="time"):
+        task_from_dict(
+            {"id": "x", "name": "x", "schedule": {"mode": "daily", "time": "1440"}}
+        )
+
+
+def test_yaml_time_with_seconds_is_normalized() -> None:
+    t = task_from_dict(
+        {"id": "x", "name": "x", "schedule": {"mode": "daily", "time": "07:25:00"}}
+    )
+    assert t.schedule.time == "07:25"
+
+
+def test_yaml_sexagesimal_midnight_hour_is_normalized() -> None:
+    """Unquoted `0:30` becomes YAML int 30; must still be 00:30, not '30'."""
+    t = task_from_dict(
+        {"id": "x", "name": "x", "schedule": {"mode": "daily", "time": 30}}
+    )
+    assert t.schedule.time == "00:30"
+
+
+def test_interval_minutes_must_be_positive() -> None:
+    with pytest.raises(ConfigError, match="interval"):
+        task_from_dict(
+            {
+                "id": "x",
+                "name": "x",
+                "schedule": {"mode": "interval", "interval_minutes": 0},
+            }
+        )

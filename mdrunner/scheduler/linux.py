@@ -102,6 +102,11 @@ def _format_oncalendar(task: Task) -> tuple[str, str]:
     interval task of an hour or more.
     """
     s = task.schedule
+    if s.mode == "quota":
+        raise ValueError(
+            "quota-triggered tasks have no OS calendar; "
+            "install the quota poll timer instead"
+        )
     if s.mode == "interval":
         minutes = max(1, int(s.interval_minutes))
         return (

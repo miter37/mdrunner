@@ -215,6 +215,11 @@ def test_run_task_success(tmp_path: Path, fake_agent_dir: Path, config_paths) ->
     log = Path(result.log_file).read_text(encoding="utf-8")
     assert f"Saved: {tmp_path}/output.md" in log
     assert "저장 완료" in log
+    assert "agent=fake" in log
+    assert "===== mdrunner start" in log
+    assert "===== mdrunner end" in log
+    assert "status=ok" in log
+    assert "run=" in log
 
 
 def test_run_task_nonzero_exit(tmp_path: Path, fake_agent_dir: Path, config_paths) -> None:
@@ -232,6 +237,11 @@ def test_run_task_nonzero_exit(tmp_path: Path, fake_agent_dir: Path, config_path
     )
     assert not result.ok
     assert result.exit_code == 7
+    log = Path(result.log_file).read_text(encoding="utf-8")
+    assert "===== mdrunner end" in log
+    assert "status=fail" in log
+    assert "exit_code=7" in log
+    assert "agent=fake" in log
 
 
 def test_run_task_binary_missing(tmp_path: Path, config_paths) -> None:
@@ -245,6 +255,12 @@ def test_run_task_binary_missing(tmp_path: Path, config_paths) -> None:
         "t", mode="manual", settings=settings, tasks_file=tasks_p, settings_file=settings_p
     )
     assert not result.ok
+    assert result.log_file and Path(result.log_file).exists()
+    log = Path(result.log_file).read_text(encoding="utf-8")
+    assert "agent=fake" in log
+    assert "not found" in log
+    assert "===== mdrunner end" in log
+    assert "status=fail" in log
     assert "not found" in (result.error or "")
 
 
@@ -275,7 +291,40 @@ def test_run_task_disabled(tmp_path: Path, fake_agent_dir: Path, config_paths) -
         "t", mode="manual", settings=settings, tasks_file=tasks_p, settings_file=settings_p
     )
     assert not result.ok
-    assert "disabled" in (result.error or "")
+    assert result.skipped
+    assert "disabled" in (result.skip_reason or "")
+
+
+def test_log_records_session_id_and_failure_reason(
+    tmp_path: Path, fake_agent_dir: Path, config_paths
+) -> None:
+    script = fake_agent_dir / "fakeagent"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'session id: 019f605e-15ee-7322-8957-2c6b0ec00155'\n"
+        "echo 'Error: timeout waiting for response'\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    tasks_p, settings_p = config_paths
+    prompt = tmp_path / "p.md"
+    prompt.write_text("do the thing " + ("X" * 4000), encoding="utf-8")
+    write_settings(settings_p)
+    write_task(tasks_p, prompt=prompt, workdir=tmp_path)
+    settings = load_settings(settings_p)
+    result = run_task(
+        "t", mode="manual", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+    )
+    assert not result.ok
+    assert result.agent_session == "019f605e-15ee-7322-8957-2c6b0ec00155"
+    assert result.error and "timeout waiting for response" in result.error
+    log = Path(result.log_file).read_text(encoding="utf-8")
+    assert "agent=fake" in log
+    assert "agent_session=019f605e-15ee-7322-8957-2c6b0ec00155" in log
+    assert "error=timeout waiting for response" in log
+    assert "status=fail" in log
+    assert "X" * 4000 not in log  # inlined prompt must not dump into argv
 
 
 def test_preview_quotes_argv(tmp_path: Path, fake_agent_dir: Path, config_paths) -> None:
@@ -874,3 +923,113 @@ def test_interval_task_reruns_despite_default_min_rerun(
     )
     assert r1.ok and not r1.skipped
     assert r2.ok and not r2.skipped
+
+
+def test_final_message_is_extracted_and_sent(
+    tmp_path: Path, fake_agent_dir: Path, config_paths
+) -> None:
+    from unittest.mock import patch
+
+    import yaml
+
+    script = fake_agent_dir / "fakeagent"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'I am waiting for tools.'\n"
+        "echo '작업이 완료되었습니다.'\n"
+        "echo '### 요약'\n"
+        "echo '- 항목 하나'\n"
+        "echo 'Saved: /tmp/nope.md'\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    tasks_p, settings_p = config_paths
+    prompt = tmp_path / "p.md"
+    prompt.write_text("hi", encoding="utf-8")
+    write_settings(settings_p)
+    tasks_p.write_text(
+        yaml.safe_dump(
+            {
+                "tasks": [
+                    {
+                        "id": "t",
+                        "name": "Digest",
+                        "enabled": True,
+                        "agent": "fake",
+                        "prompt_file": str(prompt),
+                        "working_dir": str(tmp_path),
+                        "timeout_minutes": 2,
+                        "min_rerun_interval": {"enabled": False},
+                        "notify_final_message": True,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = load_settings(settings_p)
+    with (
+        patch(
+            "mdrunner.ui._telegram_settings.load",
+            return_value={"bot_token": "tok", "chat_id": "chat"},
+        ),
+        patch("mdrunner.telegram.send", return_value=(True, '{"ok": true}')) as mock_send,
+    ):
+        result = run_task(
+            "t",
+            mode="manual",
+            settings=settings,
+            tasks_file=tasks_p,
+            settings_file=settings_p,
+        )
+    assert result.ok
+    assert result.final_message is not None
+    assert "작업이 완료되었습니다" in result.final_message
+    assert "I am waiting" not in result.final_message
+    assert "Saved:" not in result.final_message
+    mock_send.assert_called_once()
+    sent = mock_send.call_args.kwargs["text"]
+    assert "Digest" in sent
+    assert "작업이 완료되었습니다" in sent
+    log = Path(result.log_file).read_text(encoding="utf-8")
+    assert "telegram final message sent" in log
+
+
+def test_disabled_scheduled_run_is_skip_not_failure(
+    tmp_path: Path, fake_agent_dir: Path, config_paths
+) -> None:
+    """A disabled task must not look like a failed run (no fail telegram / exit 1)."""
+    import yaml
+
+    tasks_p, settings_p = config_paths
+    prompt = tmp_path / "p.md"
+    prompt.write_text("hi", encoding="utf-8")
+    write_settings(settings_p)
+    tasks_p.write_text(
+        yaml.safe_dump(
+            {
+                "tasks": [
+                    {
+                        "id": "t",
+                        "name": "T",
+                        "enabled": False,
+                        "agent": "fake",
+                        "prompt_file": str(prompt),
+                        "working_dir": str(tmp_path),
+                        "timeout_minutes": 2,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = load_settings(settings_p)
+    r = run_task(
+        "t", mode="scheduled", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+    )
+    assert r.skipped
+    assert not r.ok
+    assert r.error is None
+    assert "disabled" in (r.skip_reason or "")

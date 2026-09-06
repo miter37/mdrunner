@@ -85,21 +85,34 @@ def _agent_windows_now(agent: str, snapshot: Optional[dict]):
     return [_as_window_dict(w) for w in r.windows], True, "live"
 
 
-def _clause_result(clause_kind: str, value: float, w: Optional[dict], now: float):
-    """(result | None, detail str). None = data missing for this clause."""
+def _clause_result(
+    clause_kind: str, value: float, op: str, w: Optional[dict], now: float
+):
+    """(result | None, detail str). None = data missing for this clause.
+
+    ``op`` is ``"gte"``/``"lte"`` for ``used`` clauses; ``reset`` ignores it
+    and always compares ``<=`` hours.
+    """
     if not w:
         return None, "no data"
     if clause_kind == "used":
         up = w.get("used_percent")
         if up is None:
             return None, "used% not reported"
+        if op == "lte":
+            return up <= value, f"used {up:g}% (need ≤{value:g}%)"
         return up >= value, f"used {up:g}% (need ≥{value:g}%)"
     # reset: how long until the window refreshes
     secs = w.get("seconds_until_reset")
-    if secs is None and w.get("resets_at"):
+    if secs is None and w.get("resets_at") is not None:
         secs = w["resets_at"] - now
     if secs is None:
         return None, "reset time not reported"
+    # A stamp already well in the past is stale — we don't know the *next*
+    # reset, so this clause is unknown rather than "resets in -10h ≤ 3h".
+    if secs < -60:
+        return None, "reset time is in the past"
+    secs = max(0.0, float(secs))
     hrs = secs / 3600.0
     return hrs <= value, f"resets in {hrs:.1f}h (need ≤{value:g}h)"
 
@@ -117,8 +130,8 @@ def _quota_met(task: Task, snapshot: Optional[dict]) -> GateDecision:
     results: list[bool] = []
     details: list[str] = []
     unknown: list[str] = []
-    for label, window, kind, value in c.active():
-        res, detail = _clause_result(kind, value, by_label.get(window), now)
+    for label, window, kind, value, op in c.active():
+        res, detail = _clause_result(kind, value, op, by_label.get(window), now)
         if res is None:
             unknown.append(f"{label} ({detail})")
         else:

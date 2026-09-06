@@ -21,12 +21,16 @@ def _task(**kw) -> Task:
 
 
 def _cond(**clauses) -> QuotaCondition:
-    """_cond(weekly_used=(True, 90), fivehour_reset=(True, 3), on_unknown="skip")."""
+    """_cond(weekly_used=(True, 90), fivehour_reset=(True, 3), on_unknown="skip").
+
+    A clause spec may be ``(enabled, value)`` or ``(enabled, value, op)``.
+    """
     on_unknown = clauses.pop("on_unknown", "skip")
     kw = {}
     for attr, spec in clauses.items():
-        enabled, value = spec
-        kw[attr] = QuotaClause(enabled=enabled, value=value)
+        enabled, value, *rest = spec
+        op = rest[0] if rest else "gte"
+        kw[attr] = QuotaClause(enabled=enabled, value=value, op=op)
     return QuotaCondition(on_unknown=on_unknown, **kw)
 
 
@@ -107,6 +111,18 @@ def test_used_clause_below_threshold_skips():
     )
     snap = _snapshot("codex", [{"label": "weekly", "used_percent": 40}])
     assert not check_task_gate(t, last_run_at=None, snapshot=snap).allowed
+
+
+def test_used_clause_lte_operator_allows_when_below():
+    """op='lte' flips the comparison: run only while usage stays low."""
+    t = _task(
+        min_rerun_interval=MinRerunInterval(enabled=False),
+        quota_condition=_cond(weekly_used=(True, 20, "lte")),
+    )
+    low = _snapshot("codex", [{"label": "weekly", "used_percent": 12}])
+    assert check_task_gate(t, last_run_at=None, snapshot=low).allowed
+    high = _snapshot("codex", [{"label": "weekly", "used_percent": 55}])
+    assert not check_task_gate(t, last_run_at=None, snapshot=high).allowed
 
 
 def test_multiple_used_clauses_are_anded():
@@ -265,6 +281,21 @@ def test_future_last_run_does_not_wedge_the_task():
     t = _task(min_rerun_interval=MinRerunInterval(enabled=True, hours=6))
     d = check_task_gate(t, last_run_at=time.time() + 3600, snapshot=None)
     assert d.allowed
+
+
+def test_past_reset_is_not_treated_as_upcoming():
+    """A resets_at already in the past is stale — not 'resets within N hours'."""
+    t = _task(
+        min_rerun_interval=MinRerunInterval(enabled=False),
+        quota_condition=_cond(weekly_reset=(True, 3), on_unknown="skip"),
+    )
+    snap = _snapshot(
+        "codex",
+        [{"label": "weekly", "used_percent": 20, "resets_at": time.time() - 10 * 3600}],
+    )
+    d = check_task_gate(t, last_run_at=None, snapshot=snap)
+    assert not d.allowed
+    assert "incomplete" in d.reason or "unknown" in d.reason or "past" in d.reason
 
 
 def test_min_rerun_checked_before_quota():

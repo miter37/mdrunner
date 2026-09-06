@@ -95,6 +95,9 @@ class RunResult:
     error: str | None = None
     skipped: bool = False          # a gate (min-interval / quota) blocked the run
     skip_reason: str | None = None
+    final_message: str | None = None  # best-effort last user-facing reply
+    run_id: str | None = None
+    agent_session: str | None = None
 
     @property
     def duration_seconds(self) -> float:
@@ -309,16 +312,8 @@ def run_task(
     task = find_task(tasks, task_id)
 
     if not task.enabled:
-        return RunResult(
-            task_id=task_id,
-            started_at=time.time(),
-            finished_at=time.time(),
-            exit_code=None,
-            timed_out=False,
-            binary_path=None,
-            argv=[],
-            error=f"task {task_id!r} is disabled (enabled=false)",
-        )
+        # A leftover OS timer must not look like a failed run (exit 1 + telegram).
+        return _skipped_result(task_id, f"task {task_id!r} is disabled")
 
     agent_cfg = settings.agents.get(task.agent)
     if agent_cfg is None:
@@ -350,6 +345,8 @@ def run_task(
     result = _execute(task, agent_cfg, settings.defaults, mode, timeout_override)
     if not result.skipped:
         _record_real_run(task_id)
+    if result.ok and task.notify_final_message:
+        _send_final_message_via_telegram(task, result)
     if result.ok and task.notify_artifact:
         delivery = _send_result_artifacts_via_telegram(task, settings, result)
         if delivery.ok:
@@ -367,6 +364,48 @@ def run_task(
                         f"\n[mdrunner] telegram artifact delivery failed: {result.error}\n"
                     )
     return result
+
+
+def _send_final_message_via_telegram(task: Task, result: RunResult) -> None:
+    """Best-effort: never fails the run if Telegram or extraction misses."""
+    from . import telegram
+    from .final_message import format_final_message, split_telegram_chunks
+    from .ui import _telegram_settings
+
+    cfg = _telegram_settings.load()
+    bot_token = cfg.get("bot_token")
+    chat_id = cfg.get("chat_id")
+    log_note = ""
+    if not bot_token or not chat_id:
+        log_note = "telegram bot_token / chat_id not configured"
+    elif not result.final_message:
+        log_note = "no final message extracted from agent stdout"
+    else:
+        chunks = split_telegram_chunks(result.final_message)
+        n = len(chunks)
+        sent = 0
+        last_err = ""
+        for i, chunk in enumerate(chunks, 1):
+            text = format_final_message(task.name, chunk, part=i, parts=n)
+            ok, detail = telegram.send(
+                bot_token=bot_token, chat_id=chat_id, text=text, timeout=15.0
+            )
+            if ok:
+                sent += 1
+            else:
+                last_err = detail
+                break
+        if sent == n:
+            log_note = f"telegram final message sent ({sent} part{'s' if sent != 1 else ''})"
+        else:
+            log_note = f"telegram final message failed: {last_err or 'send failed'}"
+
+    if result.log_file:
+        try:
+            with Path(result.log_file).open("a", encoding="utf-8") as log_fh:
+                log_fh.write(f"\n[mdrunner] {log_note}\n")
+        except OSError:
+            pass
 
 
 def _send_result_artifacts_via_telegram(
@@ -466,6 +505,66 @@ def _send_result_artifacts_via_telegram(
     )
 
 
+def _preflight_fail(
+    task: Task,
+    *,
+    mode: str,
+    error: str,
+    binary_path: str | None = None,
+    argv: list[str] | None = None,
+    model: str | None = None,
+) -> RunResult:
+    from .runlog import format_end, format_start, new_run_id
+
+    started = time.time()
+    run_id = new_run_id(started)
+    log_path = task_log_file(task.id)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt = Path(task.prompt_file).expanduser() if task.prompt_file else None
+    header = format_start(
+        when=started,
+        run_id=run_id,
+        task_id=task.id,
+        agent=task.agent,
+        model=model or task.model,
+        mode=mode,
+        cwd=task.working_dir,
+        timeout_minutes=task.timeout_minutes,
+        prompt_file=prompt if prompt and prompt.exists() else None,
+        prompt_chars=0,
+        argv_line="(not started)",
+    )
+    footer = format_end(
+        when=time.time(),
+        run_id=run_id,
+        task_id=task.id,
+        agent=task.agent,
+        agent_session=None,
+        ok=False,
+        exit_code=None,
+        timed_out=False,
+        duration_s=0.0,
+        error=error,
+    )
+    try:
+        with log_path.open("a", encoding="utf-8") as log_fh:
+            log_fh.write("\n" + header + footer)
+    except OSError:
+        pass
+    return RunResult(
+        task_id=task.id,
+        started_at=started,
+        finished_at=time.time(),
+        exit_code=None,
+        timed_out=False,
+        binary_path=binary_path,
+        argv=argv or [],
+        log_file=str(log_path),
+        error=error,
+        run_id=run_id,
+    )
+
+
 def _execute(
     task: Task,
     agent_cfg,
@@ -475,28 +574,20 @@ def _execute(
 ) -> RunResult:
     binary_path = resolve_binary(agent_cfg.binary)
     if binary_path is None:
-        return RunResult(
-            task_id=task.id,
-            started_at=time.time(),
-            finished_at=time.time(),
-            exit_code=None,
-            timed_out=False,
-            binary_path=None,
-            argv=[],
+        return _preflight_fail(
+            task,
+            mode=mode,
             error=f"agent binary {agent_cfg.binary!r} not found on PATH",
         )
 
     prompt_file = Path(task.prompt_file).expanduser()
     if not prompt_file.exists():
-        return RunResult(
-            task_id=task.id,
-            started_at=time.time(),
-            finished_at=time.time(),
-            exit_code=None,
-            timed_out=False,
-            binary_path=binary_path,
-            argv=[],
+        return _preflight_fail(
+            task,
+            mode=mode,
             error=f"prompt file not found: {prompt_file}",
+            binary_path=binary_path,
+            model=task.model or agent_cfg.default_model,
         )
 
     adapter = get_adapter(task.agent)
@@ -505,15 +596,12 @@ def _execute(
 
     working_dir = Path(task.working_dir).expanduser() if task.working_dir else None
     if working_dir and not working_dir.exists():
-        return RunResult(
-            task_id=task.id,
-            started_at=time.time(),
-            finished_at=time.time(),
-            exit_code=None,
-            timed_out=False,
-            binary_path=binary_path,
-            argv=[],
+        return _preflight_fail(
+            task,
+            mode=mode,
             error=f"working_dir not found: {working_dir}",
+            binary_path=binary_path,
+            model=task.model or agent_cfg.default_model,
         )
 
     with _prompt_file_for_task(task, prompt_file) as effective_prompt_file:
@@ -537,20 +625,53 @@ def _execute(
         log_path = task_log_file(task.id)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         started = time.time()
+        from .runlog import (
+            argv_for_log,
+            format_end,
+            format_start,
+            infer_failure_reason,
+            new_run_id,
+            parse_agent_session,
+        )
+
+        run_id = new_run_id(started)
+        prompt_text = stdin_text
+        if prompt_text is None:
+            try:
+                prompt_text = effective_prompt_file.read_text(encoding="utf-8")
+            except OSError:
+                prompt_text = None
+        prompt_chars = len(prompt_text) if prompt_text is not None else 0
         accumulated_text: list[str] = []
         saved_file: str | None = None
         timed_out = False
         exit_code: int | None = None
         error: str | None = None
+        agent_session: str | None = None
 
         try:
             with task_lock(task.id):
                 with log_path.open("a", encoding="utf-8") as log_fh:
                     log_fh.write(
-                        f"\n===== mdrunner start {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started))} "
-                        f"task={task.id} mode={mode} agent={task.agent} model={model or '-'} =====\n"
+                        "\n"
+                        + format_start(
+                            when=started,
+                            run_id=run_id,
+                            task_id=task.id,
+                            agent=task.agent,
+                            model=model,
+                            mode=mode,
+                            cwd=str(cwd) if cwd else None,
+                            timeout_minutes=(
+                                timeout_override
+                                if timeout_override is not None
+                                else task.timeout_minutes
+                            ),
+                            prompt_file=effective_prompt_file,
+                            prompt_chars=prompt_chars,
+                            argv_line=argv_for_log(argv, effective_prompt_file, prompt_text),
+                        )
                     )
-                    log_fh.write(f"$ {' '.join(shlex.quote(a) for a in argv)}\n")
                     log_fh.flush()
 
                     proc = subprocess.Popen(
@@ -575,6 +696,12 @@ def _execute(
                             log_fh.write(line)
                             log_fh.flush()
                             accumulated_text.append(line)
+                            if agent_session is None:
+                                sid = parse_agent_session(line)
+                                if sid:
+                                    agent_session = sid
+                                    log_fh.write(f"[mdrunner] agent_session={sid}\n")
+                                    log_fh.flush()
                             # Streaming save-marker scan: cheap, but we only look at
                             # the last ~4 KB so the cost stays bounded for long runs.
                             # After the run finishes we do a full scan below.
@@ -598,22 +725,50 @@ def _execute(
                         if proc.poll() is None:
                             _terminate_process_tree(proc)
                             proc.wait(timeout=5)
+
+                    finished = time.time()
+                    stdout_text = "".join(accumulated_text)
+                    reason = infer_failure_reason(
+                        stdout_text,
+                        exit_code=exit_code,
+                        timed_out=timed_out,
+                        error=error,
+                    )
+                    if error is None and reason and (
+                        timed_out or exit_code not in (0, None)
+                    ):
+                        error = reason
+                    ok = exit_code == 0 and not timed_out and error is None
+                    log_fh.write(
+                        format_end(
+                            when=finished,
+                            run_id=run_id,
+                            task_id=task.id,
+                            agent=task.agent,
+                            agent_session=agent_session,
+                            ok=ok,
+                            exit_code=exit_code,
+                            timed_out=timed_out,
+                            duration_s=max(0.0, finished - started),
+                            error=error,
+                        )
+                    )
         except LockBusyError as exc:
-            return RunResult(
-                task_id=task.id,
-                started_at=started,
-                finished_at=time.time(),
-                exit_code=None,
-                timed_out=False,
+            return _preflight_fail(
+                task,
+                mode=mode,
+                error=str(exc),
                 binary_path=binary_path,
                 argv=argv,
-                log_file=str(log_path),
-                error=str(exc),
+                model=model,
             )
 
         finished = time.time()
+        stdout_text = "".join(accumulated_text)
         if saved_file is None:
-            saved_file = detect_saved_file("".join(accumulated_text), defaults.artifact_markers)
+            saved_file = detect_saved_file(stdout_text, defaults.artifact_markers)
+        from .final_message import extract_final_message
+
         return RunResult(
             task_id=task.id,
             started_at=started,
@@ -625,6 +780,9 @@ def _execute(
             log_file=str(log_path),
             saved_file=saved_file,
             error=error,
+            final_message=extract_final_message(stdout_text),
+            run_id=run_id,
+            agent_session=agent_session,
         )
 
 

@@ -122,6 +122,19 @@ def test_quota_tick_skips_when_below_threshold(paths, monkeypatch, capsys) -> No
     assert "WOULD RUN" not in out
 
 
+def test_cmd_list_shows_quota_mode_not_daily(paths, capsys) -> None:
+    tasks_p, settings_p = paths
+    prompt = tasks_p.parent / "p.md"
+    prompt.write_text("hi", encoding="utf-8")
+    _write_settings(settings_p)
+    _write_quota_task(tasks_p, prompt)
+    rc = cli.cmd_list(argparse.Namespace())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "quota" in out
+    assert "daily@" not in out
+
+
 def test_quota_tick_no_quota_tasks_is_noop(paths, monkeypatch, capsys) -> None:
     tasks_p, settings_p = paths
     _write_settings(settings_p)
