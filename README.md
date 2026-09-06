@@ -111,6 +111,7 @@ mdrunner/
 │   ├── scheduler/
 │   │   ├── base.py
 │   │   ├── linux.py                  # systemd user timer
+│   │   ├── macos.py                  # launchd user agent
 │   │   └── windows.py                # Task Scheduler (schtasks)
 │   ├── ui/                           # PySide6 GUI
 │   │   ├── theme.py                  # Fusion + QSS design system (light/dark)
