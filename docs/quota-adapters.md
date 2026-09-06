@@ -65,10 +65,13 @@ two gates checked cheap-first:
 1. `min_rerun_interval` — enough time since the task last *actually* ran?
    Skips (min-interval, quota, lock) never advance `last_run_at`, so repeated
    skips can't push the deadline forward and starve the task.
-2. `quota_condition` — the task's own agent's usage vs. a threshold, read from
-   the latest snapshot (one live `probe_quota()` for that single agent if its
-   entry is missing or older than 15 min). `on_unknown` picks `skip`/`run`
-   when there is still no reading.
+2. `quota_condition` — a 2×2 grid, `{weekly, 5-hour} × {used ≥ %, resets within
+   N hours}`, read from the latest snapshot (one live `probe_quota()` for that
+   single agent if its entry is missing or older than 15 min). Only the
+   `enabled` clauses are AND-ed, and there must be at least one. `used`
+   compares `used_percent`; `reset` compares `seconds_until_reset` (or
+   `resets_at - now`) against `value` hours. If any enabled clause can't be
+   evaluated, `on_unknown` picks `skip`/`run`.
 
 `mdrunner run <id> --mode scheduled` applies both gates (bypass with
 `--force`); `--mode manual` / GUI **Run now** bypass them. For

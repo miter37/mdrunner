@@ -864,12 +864,11 @@ def _format_schedule(t: Task) -> str:
 
 
 def _quota_condition_tag(t: Task) -> str:
-    """Compact gate/trigger label, e.g. ``codex wk used≥90%``."""
+    """Compact gate/trigger label, e.g. ``codex: wk used≥90% & 5h resets≤3h``."""
     c = t.quota_condition
-    if c is None:
+    if c is None or not c.active():
         return ""
-    win = {"weekly": "wk", "5h": "5h", "any": "5h/wk", "all": "5h&wk"}.get(c.window, c.window)
-    return f"{t.agent} {win} {c.metric}{c.comparator}{c.percent:g}%"
+    return c.describe(t.agent)
 
 
 def _format_last_run(t: Task) -> str:

@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -34,8 +35,10 @@ from .theme import mono_font, style_form
 
 from ..config import (
     QUOTA_CAPABLE_AGENTS,
+    QUOTA_CLAUSES,
     MinRerunInterval,
     OnFailure,
+    QuotaClause,
     QuotaCondition,
     Schedule,
     Settings,
@@ -56,6 +59,13 @@ WEEKDAYS = [
     ("sat", "Sat"),
     ("sun", "Sun"),
 ]
+
+_QC_DEFAULTS = {
+    "weekly_used": 90,
+    "weekly_reset": 24,
+    "fivehour_used": 90,
+    "fivehour_reset": 3,
+}
 
 COMMON_TZ = [
     "Asia/Seoul",
@@ -310,55 +320,64 @@ class TaskDialog(QDialog):
 
         content_lay.addWidget(gb_sched)
 
-        # --- Quota condition ---
+        # --- Quota condition (2x2 AND grid) ---
         self.gb_quota = QGroupBox("Quota condition", self)
         fq = QFormLayout(self.gb_quota)
         self._style_form(fq)
         qc = task.quota_condition if task else None
         self.in_qc_enabled = QCheckBox(
-            "Run only when this task's engine quota meets a condition", self.gb_quota
+            "Run only when ALL checked quota clauses hold", self.gb_quota
         )
         self.in_qc_enabled.setChecked(qc is not None)
         fq.addRow("", self.in_qc_enabled)
 
-        self.lbl_qc_engine = QLabel("—", self.gb_quota)
-        self.in_qc_window = QComboBox(self.gb_quota)
-        self.in_qc_comparator = QComboBox(self.gb_quota)
-        for sym, val in (("≥", ">="), (">", ">"), ("≤", "<="), ("<", "<")):
-            self.in_qc_comparator.addItem(sym, val)
-        self.in_qc_percent = QSpinBox(self.gb_quota)
-        self.in_qc_percent.setRange(0, 100)
-        self.in_qc_percent.setSuffix(" %")
-        self.in_qc_percent.setValue(90)
-        self.in_qc_metric = QComboBox(self.gb_quota)
-        self.in_qc_metric.addItems(["used", "remaining"])
-        cond_row = QWidget(self.gb_quota)
-        cr = QHBoxLayout(cond_row)
-        cr.setContentsMargins(0, 0, 0, 0)
-        cr.setSpacing(6)
-        cr.addWidget(self.lbl_qc_engine)
-        cr.addWidget(self.in_qc_window)
-        cr.addWidget(self.in_qc_comparator)
-        cr.addWidget(self.in_qc_percent)
-        cr.addWidget(self.in_qc_metric)
-        cr.addStretch(1)
-        fq.addRow("Condition", cond_row)
+        grid_w = QWidget(self.gb_quota)
+        grid = QGridLayout(grid_w)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(4)
+        grid.addWidget(QLabel("used ≥", grid_w), 0, 1)
+        grid.addWidget(QLabel("resets within", grid_w), 0, 2)
+        grid.addWidget(QLabel("weekly", grid_w), 1, 0)
+        grid.addWidget(QLabel("5-hour", grid_w), 2, 0)
+        _row = {"weekly": 1, "5h": 2}
+        _col = {"used": 1, "reset": 2}
+        self.qc_cells: dict[str, tuple[QCheckBox, QSpinBox]] = {}
+        for attr, window, kind, _label in QUOTA_CLAUSES:
+            cb = QCheckBox(grid_w)
+            sb = QSpinBox(grid_w)
+            if kind == "used":
+                sb.setRange(0, 100)
+                sb.setSuffix(" %")
+            else:
+                sb.setRange(1, 24 * 14)  # hours, up to ~2 weeks
+                sb.setSuffix(" h")
+            if qc:
+                clause: QuotaClause = getattr(qc, attr)
+                cb.setChecked(clause.enabled)
+                sb.setValue(int(clause.value) or _QC_DEFAULTS[attr])
+            else:
+                sb.setValue(_QC_DEFAULTS[attr])
+            cell = QWidget(grid_w)
+            ch = QHBoxLayout(cell)
+            ch.setContentsMargins(0, 0, 0, 0)
+            ch.setSpacing(4)
+            ch.addWidget(cb)
+            ch.addWidget(sb)
+            ch.addStretch(1)
+            grid.addWidget(cell, _row[window], _col[kind])
+            self.qc_cells[attr] = (cb, sb)
+        grid.setColumnStretch(3, 1)
+        fq.addRow("Clauses", grid_w)
 
         self.in_qc_on_unknown = QComboBox(self.gb_quota)
         self.in_qc_on_unknown.addItem("skip the run (safe)", "skip")
         self.in_qc_on_unknown.addItem("run anyway", "run")
-        fq.addRow("If quota can't be read", self.in_qc_on_unknown)
-
         if qc:
-            self.in_qc_comparator.setCurrentIndex(
-                max(0, self.in_qc_comparator.findData(qc.comparator))
-            )
-            self.in_qc_percent.setValue(int(qc.percent))
-            self.in_qc_metric.setCurrentText(qc.metric)
             self.in_qc_on_unknown.setCurrentIndex(
                 max(0, self.in_qc_on_unknown.findData(qc.on_unknown))
             )
-        self._qc_pref_window = qc.window if qc else "weekly"
+        fq.addRow("If quota can't be read", self.in_qc_on_unknown)
 
         self.lbl_qc_hint = QLabel(self.gb_quota)
         self.lbl_qc_hint.setWordWrap(True)
@@ -459,7 +478,8 @@ class TaskDialog(QDialog):
 
         self.in_agent.currentTextChanged.connect(self._refresh_quota_condition_ui)
         self.in_qc_enabled.toggled.connect(self._refresh_quota_condition_ui)
-        self.in_qc_window.currentIndexChanged.connect(self._refresh_quota_condition_ui)
+        for _cb, _sb in self.qc_cells.values():
+            _cb.toggled.connect(self._refresh_quota_condition_ui)
         self.in_mrr_enabled.toggled.connect(
             lambda c: self.in_mrr_hours.setEnabled(c or self.in_mode.currentData() == "quota")
         )
@@ -576,37 +596,17 @@ class TaskDialog(QDialog):
         self.in_mrr_hours.setEnabled(self.in_mrr_enabled.isChecked() or quota_mode)
 
         on = self.in_qc_enabled.isChecked() and capable
-        self.lbl_qc_engine.setText(f"{agent}:")
-        for w in (
-            self.in_qc_window,
-            self.in_qc_comparator,
-            self.in_qc_percent,
-            self.in_qc_metric,
-            self.in_qc_on_unknown,
-        ):
-            w.setEnabled(on)
-
-        # Window choices depend on what this agent actually reports.
-        wins = tuple(available_windows(agent)) if capable else ()
-        want = self.in_qc_window.currentData() or self._qc_pref_window
-        labels = {
-            "weekly": "weekly window",
-            "5h": "5-hour window",
-            "any": "either window",
-            "all": "both windows",
-        }
-        opts = list(wins)
-        if len(wins) >= 2:
-            opts += ["any", "all"]
-        self.in_qc_window.blockSignals(True)
-        self.in_qc_window.clear()
-        for w in opts:
-            self.in_qc_window.addItem(labels.get(w, w), w)
-        idx = self.in_qc_window.findData(want)
-        self.in_qc_window.setCurrentIndex(idx if idx >= 0 else 0)
-        self.in_qc_window.blockSignals(False)
-        if self.in_qc_window.currentData():
-            self._qc_pref_window = self.in_qc_window.currentData()
+        has_5h = ("5h" in available_windows(agent)) if capable else False
+        for attr, window, _kind, _label in QUOTA_CLAUSES:
+            cb, sb = self.qc_cells[attr]
+            row_ok = on and (window != "5h" or has_5h)
+            if window == "5h" and not has_5h and cb.isChecked():
+                cb.blockSignals(True)
+                cb.setChecked(False)
+                cb.blockSignals(False)
+            cb.setEnabled(row_ok)
+            sb.setEnabled(row_ok and cb.isChecked())
+        self.in_qc_on_unknown.setEnabled(on)
 
         if not capable:
             self.lbl_qc_hint.setText(
@@ -620,9 +620,10 @@ class TaskDialog(QDialog):
                 "when the condition holds (min re-run interval still applies)."
             )
         elif on:
+            extra = "" if has_5h else f"  ({agent} reports the weekly window only.)"
             self.lbl_qc_hint.setText(
-                "Runs at the scheduled time only when this condition is also met; "
-                "otherwise it is skipped (not a failure)."
+                "Runs at the scheduled time only when every checked clause holds; "
+                "otherwise it is skipped (not a failure)." + extra
             )
         else:
             self.lbl_qc_hint.setText("")
@@ -681,9 +682,9 @@ class TaskDialog(QDialog):
         self.in_mrr_enabled.setChecked(True)
         self.in_mrr_hours.setValue(6.0)
         self.in_qc_enabled.setChecked(False)
-        self.in_qc_comparator.setCurrentIndex(0)
-        self.in_qc_percent.setValue(90)
-        self.in_qc_metric.setCurrentText("used")
+        for attr, (cb, sb) in self.qc_cells.items():
+            cb.setChecked(False)
+            sb.setValue(_QC_DEFAULTS[attr])
         self.in_qc_on_unknown.setCurrentIndex(0)
         self._refresh_quota_condition_ui()
         self._refresh_preview()
@@ -789,12 +790,23 @@ class TaskDialog(QDialog):
         )
         quota_condition = None
         if qc_on and agent in QUOTA_CAPABLE_AGENTS:
+            clauses: dict[str, QuotaClause] = {}
+            any_checked = False
+            for attr, _window, _kind, _label in QUOTA_CLAUSES:
+                cb, sb = self.qc_cells[attr]
+                enabled = cb.isChecked() and cb.isEnabled()
+                any_checked = any_checked or enabled
+                clauses[attr] = QuotaClause(enabled=enabled, value=float(sb.value()))
+            if not any_checked:
+                QMessageBox.warning(
+                    self,
+                    "No quota clause checked",
+                    "Check at least one clause (weekly / 5-hour · used % or resets "
+                    "within), or turn the quota condition off.",
+                )
+                return
             quota_condition = QuotaCondition(
-                window=self.in_qc_window.currentData() or "weekly",
-                comparator=self.in_qc_comparator.currentData() or ">=",
-                percent=float(self.in_qc_percent.value()),
-                metric=self.in_qc_metric.currentText(),
-                on_unknown=self.in_qc_on_unknown.currentData() or "skip",
+                on_unknown=self.in_qc_on_unknown.currentData() or "skip", **clauses
             )
 
         if self._prompt_source() == "inline":

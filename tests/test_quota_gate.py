@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from mdrunner.config import MinRerunInterval, QuotaCondition, Schedule, Task
+from mdrunner.config import MinRerunInterval, QuotaClause, QuotaCondition, Schedule, Task
 from mdrunner.quota_gate import available_windows, check_task_gate
 
 
@@ -18,6 +18,16 @@ def _task(**kw) -> Task:
     )
     base.update(kw)
     return Task(**base)
+
+
+def _cond(**clauses) -> QuotaCondition:
+    """_cond(weekly_used=(True, 90), fivehour_reset=(True, 3), on_unknown="skip")."""
+    on_unknown = clauses.pop("on_unknown", "skip")
+    kw = {}
+    for attr, spec in clauses.items():
+        enabled, value = spec
+        kw[attr] = QuotaClause(enabled=enabled, value=value)
+    return QuotaCondition(on_unknown=on_unknown, **kw)
 
 
 def _snapshot(agent: str, windows: list[dict], *, available: bool = True) -> dict:
@@ -72,49 +82,37 @@ def test_min_rerun_disabled_is_ignored():
 def test_manual_bypasses_all_gates():
     t = _task(
         min_rerun_interval=MinRerunInterval(enabled=True, hours=6),
-        quota_condition=QuotaCondition(window="weekly", comparator=">=", percent=90),
+        quota_condition=_cond(weekly_used=(True, 90)),
     )
     d = check_task_gate(t, last_run_at=time.time() - 60, snapshot=None, is_manual=True)
     assert d.allowed
 
 
-# ------------------------------------------------------------------- quota gate
+# ------------------------------------------------------------------- quota gate: used %
 
 
-def test_quota_condition_met_allows():
+def test_used_clause_met_allows():
     t = _task(
         min_rerun_interval=MinRerunInterval(enabled=False),
-        quota_condition=QuotaCondition(window="weekly", comparator=">=", percent=90, metric="used"),
+        quota_condition=_cond(weekly_used=(True, 90)),
     )
     snap = _snapshot("codex", [{"label": "weekly", "used_percent": 95}])
-    d = check_task_gate(t, last_run_at=None, snapshot=snap)
-    assert d.allowed
+    assert check_task_gate(t, last_run_at=None, snapshot=snap).allowed
 
 
-def test_quota_condition_below_threshold_skips():
+def test_used_clause_below_threshold_skips():
     t = _task(
         min_rerun_interval=MinRerunInterval(enabled=False),
-        quota_condition=QuotaCondition(window="weekly", comparator=">=", percent=90, metric="used"),
+        quota_condition=_cond(weekly_used=(True, 90)),
     )
     snap = _snapshot("codex", [{"label": "weekly", "used_percent": 40}])
-    d = check_task_gate(t, last_run_at=None, snapshot=snap)
-    assert not d.allowed
+    assert not check_task_gate(t, last_run_at=None, snapshot=snap).allowed
 
 
-def test_quota_condition_remaining_metric():
+def test_multiple_used_clauses_are_anded():
     t = _task(
         min_rerun_interval=MinRerunInterval(enabled=False),
-        quota_condition=QuotaCondition(window="weekly", comparator="<=", percent=10, metric="remaining"),
-    )
-    snap = _snapshot("codex", [{"label": "weekly", "used_percent": 95}])  # remaining = 5
-    d = check_task_gate(t, last_run_at=None, snapshot=snap)
-    assert d.allowed
-
-
-def test_quota_window_all_requires_both():
-    t = _task(
-        min_rerun_interval=MinRerunInterval(enabled=False),
-        quota_condition=QuotaCondition(window="all", comparator=">=", percent=90),
+        quota_condition=_cond(weekly_used=(True, 90), fivehour_used=(True, 90)),
     )
     both_hot = _snapshot(
         "codex",
@@ -123,39 +121,122 @@ def test_quota_window_all_requires_both():
     assert check_task_gate(t, last_run_at=None, snapshot=both_hot).allowed
     one_cold = _snapshot(
         "codex",
-        [{"label": "5h", "used_percent": 92}, {"label": "weekly", "used_percent": 10}],
+        [{"label": "5h", "used_percent": 10}, {"label": "weekly", "used_percent": 91}],
     )
     assert not check_task_gate(t, last_run_at=None, snapshot=one_cold).allowed
 
 
-def test_quota_window_any_needs_one():
+def test_unchecked_clause_is_ignored():
+    """Only the enabled clause matters; the disabled 5h one does not."""
     t = _task(
         min_rerun_interval=MinRerunInterval(enabled=False),
-        quota_condition=QuotaCondition(window="any", comparator=">=", percent=90),
+        quota_condition=_cond(weekly_used=(True, 90), fivehour_used=(False, 99)),
     )
     snap = _snapshot(
         "codex",
-        [{"label": "5h", "used_percent": 10}, {"label": "weekly", "used_percent": 99}],
+        [{"label": "5h", "used_percent": 1}, {"label": "weekly", "used_percent": 95}],
     )
     assert check_task_gate(t, last_run_at=None, snapshot=snap).allowed
 
 
-def test_on_unknown_skip_vs_run(monkeypatch):
+# ------------------------------------------------------------- quota gate: reset time
+
+
+def test_reset_clause_met_when_window_refreshes_soon():
+    t = _task(
+        min_rerun_interval=MinRerunInterval(enabled=False),
+        quota_condition=_cond(weekly_reset=(True, 6)),  # resets within 6h
+    )
+    soon = _snapshot(
+        "codex",
+        [{"label": "weekly", "used_percent": 20, "seconds_until_reset": 2 * 3600}],
+    )
+    assert check_task_gate(t, last_run_at=None, snapshot=soon).allowed
+    later = _snapshot(
+        "codex",
+        [{"label": "weekly", "used_percent": 20, "seconds_until_reset": 30 * 3600}],
+    )
+    assert not check_task_gate(t, last_run_at=None, snapshot=later).allowed
+
+
+def test_reset_clause_derives_seconds_from_resets_at():
+    t = _task(
+        min_rerun_interval=MinRerunInterval(enabled=False),
+        quota_condition=_cond(weekly_reset=(True, 5)),
+    )
+    snap = _snapshot(
+        "codex",
+        [{"label": "weekly", "used_percent": 10, "resets_at": time.time() + 3600}],
+    )
+    assert check_task_gate(t, last_run_at=None, snapshot=snap).allowed
+
+
+def test_used_and_reset_clauses_together():
+    t = _task(
+        min_rerun_interval=MinRerunInterval(enabled=False),
+        quota_condition=_cond(weekly_used=(True, 80), weekly_reset=(True, 12)),
+    )
+    hot_and_soon = _snapshot(
+        "codex",
+        [{"label": "weekly", "used_percent": 88, "seconds_until_reset": 4 * 3600}],
+    )
+    assert check_task_gate(t, last_run_at=None, snapshot=hot_and_soon).allowed
+    hot_but_far = _snapshot(
+        "codex",
+        [{"label": "weekly", "used_percent": 88, "seconds_until_reset": 40 * 3600}],
+    )
+    assert not check_task_gate(t, last_run_at=None, snapshot=hot_but_far).allowed
+
+
+# --------------------------------------------------------------------- on_unknown
+
+
+def test_incomplete_data_uses_on_unknown(monkeypatch):
     import mdrunner.quota_gate as qg
 
-    monkeypatch.setattr(
-        qg, "_agent_windows_now", lambda a, s: ([], False, "no data")
-    )
+    monkeypatch.setattr(qg, "_agent_windows_now", lambda a, s: ([], False, "no data"))
     skip = _task(
         min_rerun_interval=MinRerunInterval(enabled=False),
-        quota_condition=QuotaCondition(window="weekly", on_unknown="skip"),
+        quota_condition=_cond(weekly_used=(True, 90), on_unknown="skip"),
     )
     run = _task(
         min_rerun_interval=MinRerunInterval(enabled=False),
-        quota_condition=QuotaCondition(window="weekly", on_unknown="run"),
+        quota_condition=_cond(weekly_used=(True, 90), on_unknown="run"),
     )
     assert not check_task_gate(skip, last_run_at=None, snapshot=None).allowed
     assert check_task_gate(run, last_run_at=None, snapshot=None).allowed
+
+
+def test_one_clause_unreadable_falls_to_on_unknown():
+    """weekly used is fine, but the 5h window isn't reported at all."""
+    t = _task(
+        min_rerun_interval=MinRerunInterval(enabled=False),
+        quota_condition=_cond(weekly_used=(True, 90), fivehour_used=(True, 90), on_unknown="skip"),
+    )
+    snap = _snapshot("codex", [{"label": "weekly", "used_percent": 99}])
+    d = check_task_gate(t, last_run_at=None, snapshot=snap)
+    assert not d.allowed
+    assert "incomplete" in d.reason
+
+
+def test_probe_crash_is_caught(monkeypatch):
+    def _boom(_agent):
+        raise RuntimeError("pty exploded")
+
+    monkeypatch.setattr("mdrunner.quota.probe_quota", _boom)
+    skip = _task(
+        min_rerun_interval=MinRerunInterval(enabled=False),
+        quota_condition=_cond(weekly_used=(True, 90), on_unknown="skip"),
+    )
+    run = _task(
+        min_rerun_interval=MinRerunInterval(enabled=False),
+        quota_condition=_cond(weekly_used=(True, 90), on_unknown="run"),
+    )
+    assert not check_task_gate(skip, last_run_at=None, snapshot=None).allowed
+    assert check_task_gate(run, last_run_at=None, snapshot=None).allowed
+
+
+# ----------------------------------------------------------------- ordering / interval
 
 
 def test_interval_task_not_blocked_by_default_min_rerun():
@@ -172,7 +253,7 @@ def test_interval_task_with_quota_condition_still_honors_min_rerun():
     t = _task(
         schedule=Schedule(mode="interval", interval_minutes=30),
         min_rerun_interval=MinRerunInterval(enabled=True, hours=6),
-        quota_condition=QuotaCondition(window="weekly", comparator=">=", percent=1),
+        quota_condition=_cond(weekly_used=(True, 1)),
     )
     d = check_task_gate(t, last_run_at=time.time() - 600, snapshot=None)
     assert not d.allowed
@@ -186,28 +267,11 @@ def test_future_last_run_does_not_wedge_the_task():
     assert d.allowed
 
 
-def test_probe_crash_is_caught(monkeypatch):
-    def _boom(_agent):
-        raise RuntimeError("pty exploded")
-
-    monkeypatch.setattr("mdrunner.quota.probe_quota", _boom)
-    skip = _task(
-        min_rerun_interval=MinRerunInterval(enabled=False),
-        quota_condition=QuotaCondition(window="weekly", on_unknown="skip"),
-    )
-    run = _task(
-        min_rerun_interval=MinRerunInterval(enabled=False),
-        quota_condition=QuotaCondition(window="weekly", on_unknown="run"),
-    )
-    assert not check_task_gate(skip, last_run_at=None, snapshot=None).allowed
-    assert check_task_gate(run, last_run_at=None, snapshot=None).allowed
-
-
 def test_min_rerun_checked_before_quota():
     """A too-recent run is blocked even if the quota condition would pass."""
     t = _task(
         min_rerun_interval=MinRerunInterval(enabled=True, hours=6),
-        quota_condition=QuotaCondition(window="weekly", comparator=">=", percent=1),
+        quota_condition=_cond(weekly_used=(True, 1)),
     )
     snap = _snapshot("codex", [{"label": "weekly", "used_percent": 99}])
     d = check_task_gate(t, last_run_at=time.time() - 600, snapshot=snap)

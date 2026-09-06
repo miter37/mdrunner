@@ -267,19 +267,26 @@ A task can be tied to its own agent's quota usage. Two shapes:
   runs the task whenever the condition is met. `mode: quota` requires
   `min_rerun_interval.enabled: true` so the poller can't fire it back-to-back.
 
+`quota_condition` is a 2×2 grid — `{weekly, 5-hour} × {used %, resets within N
+hours}`. Each clause has its own `enabled` flag and **only the enabled clauses
+are AND-ed**. Operators are fixed: `used` means "≥ this percent", `reset` means
+"the window refreshes in ≤ this many hours" (all durations in hours).
+
 ```yaml
 quota_condition:
-  window: weekly      # weekly | 5h | any (either) | all (both) — only windows the agent reports
-  comparator: ">="    # >= | > | <= | <
-  percent: 90
-  metric: used        # used | remaining
-  on_unknown: skip    # skip | run  — when the quota can't be read
+  weekly_used:    {enabled: true,  value: 90}   # weekly usage ≥ 90%
+  weekly_reset:   {enabled: false, value: 24}   # weekly window refreshes within 24h
+  fivehour_used:  {enabled: true,  value: 90}   # 5-hour usage ≥ 90%
+  fivehour_reset: {enabled: false, value: 3}    # 5-hour window refreshes within 3h
+  on_unknown: skip                              # skip | run — when the quota can't be read
 ```
 
-The condition's agent is always the task's `agent`, and it must be a
-quota-capable one (`claude`, `codex`, `agy`, `grok`; `grok` reports the weekly
-window only). Enable the trigger timer with `mdrunner quota-schedule install`;
-`mdrunner validate` flags a `mode: quota` task whose timer is missing.
+At least one clause must be enabled. The condition's agent is always the task's
+`agent` and must be quota-capable (`claude`, `codex`, `agy`, `grok`); `grok`
+reports the weekly window only, so its 5-hour clauses are rejected. If any
+enabled clause can't be evaluated, `on_unknown` decides. Enable the trigger
+timer with `mdrunner quota-schedule install`; `mdrunner validate` flags a
+`mode: quota` task whose timer is missing.
 
 ### Agent quota (`mdrunner quota`)
 

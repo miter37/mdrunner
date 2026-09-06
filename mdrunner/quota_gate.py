@@ -47,13 +47,6 @@ def available_windows(agent: str, snapshot: Optional[dict] = None) -> tuple[str,
     return tuple(dict.fromkeys(labels)) or _STATIC_WINDOWS.get(agent, ("weekly",))
 
 
-def _cmp(value: float, comparator: str, target: float) -> bool:
-    return {
-        ">=": value >= target, ">": value > target,
-        "<=": value <= target, "<": value < target,
-    }[comparator]
-
-
 def _as_window_dict(w) -> dict:
     """Coerce a QuotaWindow (dataclass / obj / dict) to a plain dict."""
     if isinstance(w, dict):
@@ -92,44 +85,56 @@ def _agent_windows_now(agent: str, snapshot: Optional[dict]):
     return [_as_window_dict(w) for w in r.windows], True, "live"
 
 
+def _clause_result(clause_kind: str, value: float, w: Optional[dict], now: float):
+    """(result | None, detail str). None = data missing for this clause."""
+    if not w:
+        return None, "no data"
+    if clause_kind == "used":
+        up = w.get("used_percent")
+        if up is None:
+            return None, "used% not reported"
+        return up >= value, f"used {up:g}% (need ≥{value:g}%)"
+    # reset: how long until the window refreshes
+    secs = w.get("seconds_until_reset")
+    if secs is None and w.get("resets_at"):
+        secs = w["resets_at"] - now
+    if secs is None:
+        return None, "reset time not reported"
+    hrs = secs / 3600.0
+    return hrs <= value, f"resets in {hrs:.1f}h (need ≤{value:g}h)"
+
+
 def _quota_met(task: Task, snapshot: Optional[dict]) -> GateDecision:
     c = task.quota_condition
     assert c is not None
+    now = time.time()
     windows, data_ok, note = _agent_windows_now(task.agent, snapshot)
     if not data_ok:
         allow = c.on_unknown == "run"
         return GateDecision(allow, f"quota unknown ({note}) → {'run' if allow else 'skip'}")
 
     by_label = {w.get("label"): w for w in windows}
-    want = {"weekly": ["weekly"], "5h": ["5h"], "any": ["5h", "weekly"],
-            "all": ["5h", "weekly"]}[c.window]
-    checks: list[tuple[str, Optional[bool]]] = []
-    for lbl in want:
-        w = by_label.get(lbl)
-        up = w.get("used_percent") if w else None
-        if up is None:
-            checks.append((lbl, None))
-            continue
-        value = up if c.metric == "used" else 100.0 - up
-        checks.append((lbl, _cmp(value, c.comparator, c.percent)))
+    results: list[bool] = []
+    details: list[str] = []
+    unknown: list[str] = []
+    for label, window, kind, value in c.active():
+        res, detail = _clause_result(kind, value, by_label.get(window), now)
+        if res is None:
+            unknown.append(f"{label} ({detail})")
+        else:
+            results.append(res)
+            details.append(f"{label}: {detail} → {'ok' if res else 'no'}")
 
-    usable = [(lbl, res) for lbl, res in checks if res is not None]
-    if not usable:
+    if unknown:
         allow = c.on_unknown == "run"
-        return GateDecision(allow, f"quota window {c.window} not reported → "
-                            f"{'run' if allow else 'skip'}")
-    if c.window == "all":
-        met = len(usable) == len(want) and all(res for _, res in usable)
-    else:  # weekly / 5h / any
-        met = any(res for _, res in usable)
+        return GateDecision(
+            allow,
+            f"quota data incomplete [{', '.join(unknown)}] → {'run' if allow else 'skip'}",
+        )
 
-    detail = ", ".join(
-        f"{lbl} {by_label[lbl].get('used_percent')}%" for lbl, _ in usable
-    )
-    verb = "meets" if met else "below"
-    return GateDecision(
-        met, f"{c.describe(task.agent)} — {detail} {verb} threshold"
-    )
+    met = all(results)
+    verb = "all clauses met" if met else "clause(s) not met"
+    return GateDecision(met, f"{c.describe(task.agent)} — {verb}: {'; '.join(details)}")
 
 
 def check_task_gate(

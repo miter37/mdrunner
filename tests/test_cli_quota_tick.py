@@ -58,10 +58,7 @@ def _write_quota_task(p: Path, prompt: Path, *, percent: float = 90.0) -> None:
                         "schedule": {"mode": "quota"},
                         "min_rerun_interval": {"enabled": True, "hours": 6},
                         "quota_condition": {
-                            "window": "weekly",
-                            "comparator": ">=",
-                            "percent": percent,
-                            "metric": "used",
+                            "weekly_used": {"enabled": True, "value": percent},
                             "on_unknown": "skip",
                         },
                     }

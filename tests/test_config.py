@@ -206,10 +206,8 @@ def _qc_task_raw(**over) -> dict:
         "schedule": {"mode": "daily", "time": "02:00"},
         "min_rerun_interval": {"enabled": True, "hours": 6},
         "quota_condition": {
-            "window": "weekly",
-            "comparator": ">=",
-            "percent": 90,
-            "metric": "used",
+            "weekly_used": {"enabled": True, "value": 90},
+            "fivehour_reset": {"enabled": True, "value": 3},
             "on_unknown": "skip",
         },
     }
@@ -226,9 +224,12 @@ def test_min_rerun_interval_defaults_on() -> None:
 
 def test_quota_condition_roundtrip() -> None:
     t = task_from_dict(_qc_task_raw())
-    assert t.quota_condition is not None
-    assert t.quota_condition.window == "weekly"
-    assert t.quota_condition.describe("codex") == "codex weekly used >= 90%"
+    c = t.quota_condition
+    assert c is not None
+    assert c.weekly_used.enabled and c.weekly_used.value == 90.0
+    assert c.fivehour_reset.enabled and c.fivehour_reset.value == 3.0
+    assert not c.weekly_reset.enabled and not c.fivehour_used.enabled
+    assert c.describe("codex") == "codex: wk used≥90% & 5h resets≤3h"
     assert task_from_dict(task_to_dict(t)) == t
 
 
@@ -237,18 +238,31 @@ def test_quota_condition_rejects_non_capable_agent() -> None:
         task_from_dict(_qc_task_raw(agent="opencode"))
 
 
-def test_quota_condition_rejects_bad_window() -> None:
+def test_quota_condition_rejects_no_clause_checked() -> None:
     raw = _qc_task_raw()
-    raw["quota_condition"]["window"] = "monthly"
+    raw["quota_condition"] = {
+        "weekly_used": {"enabled": False, "value": 90},
+        "on_unknown": "skip",
+    }
     with pytest.raises(ConfigError):
         task_from_dict(raw)
 
 
-def test_quota_condition_rejects_bad_comparator() -> None:
-    raw = _qc_task_raw()
-    raw["quota_condition"]["comparator"] = "=="
+def test_quota_condition_rejects_five_hour_clause_for_grok() -> None:
+    raw = _qc_task_raw(agent="grok")
+    raw["quota_condition"] = {
+        "weekly_used": {"enabled": True, "value": 80},
+        "fivehour_used": {"enabled": True, "value": 90},
+    }
     with pytest.raises(ConfigError):
         task_from_dict(raw)
+
+
+def test_quota_condition_weekly_only_ok_for_grok() -> None:
+    raw = _qc_task_raw(agent="grok")
+    raw["quota_condition"] = {"weekly_reset": {"enabled": True, "value": 12}}
+    t = task_from_dict(raw)
+    assert t.quota_condition.weekly_reset.enabled
 
 
 def test_quota_mode_needs_condition() -> None:
@@ -272,13 +286,6 @@ def test_quota_mode_ok_when_both_present() -> None:
     assert t.min_rerun_interval.enabled is True
 
 
-def test_quota_condition_rejects_bad_metric() -> None:
-    raw = _qc_task_raw()
-    raw["quota_condition"]["metric"] = "leftover"
-    with pytest.raises(ConfigError):
-        task_from_dict(raw)
-
-
 def test_quota_condition_rejects_bad_on_unknown() -> None:
     raw = _qc_task_raw()
     raw["quota_condition"]["on_unknown"] = "explode"
@@ -286,18 +293,34 @@ def test_quota_condition_rejects_bad_on_unknown() -> None:
         task_from_dict(raw)
 
 
-def test_quota_condition_rejects_percent_out_of_range() -> None:
+def test_quota_condition_rejects_used_percent_out_of_range() -> None:
     raw = _qc_task_raw()
-    raw["quota_condition"]["percent"] = 150
+    raw["quota_condition"]["weekly_used"] = {"enabled": True, "value": 150}
     with pytest.raises(ConfigError):
         task_from_dict(raw)
 
 
-def test_quota_condition_rejects_non_numeric_percent() -> None:
+def test_quota_condition_rejects_non_positive_reset_hours() -> None:
     raw = _qc_task_raw()
-    raw["quota_condition"]["percent"] = "lots"
+    raw["quota_condition"]["weekly_reset"] = {"enabled": True, "value": 0}
     with pytest.raises(ConfigError):
         task_from_dict(raw)
+
+
+def test_quota_condition_rejects_non_numeric_value() -> None:
+    raw = _qc_task_raw()
+    raw["quota_condition"]["weekly_used"] = {"enabled": True, "value": "lots"}
+    with pytest.raises(ConfigError):
+        task_from_dict(raw)
+
+
+def test_quota_condition_legacy_shape_is_migrated() -> None:
+    raw = _qc_task_raw()
+    raw["quota_condition"] = {"window": "weekly", "percent": 75, "on_unknown": "run"}
+    t = task_from_dict(raw)
+    assert t.quota_condition.weekly_used.enabled
+    assert t.quota_condition.weekly_used.value == 75.0
+    assert t.quota_condition.on_unknown == "run"
 
 
 def test_min_rerun_rejects_non_positive_hours() -> None:

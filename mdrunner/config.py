@@ -30,9 +30,8 @@ VALID_WEEKDAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
 # "quota" = no time trigger; the quota-tick poller evaluates the condition.
 VALID_SCHEDULE_MODES = {"once", "daily", "weekly", "interval", "quota"}
 QUOTA_CAPABLE_AGENTS = {"claude", "codex", "agy", "grok"}
-VALID_QUOTA_WINDOWS = {"weekly", "5h", "any", "all"}
-VALID_COMPARATORS = {">=", ">", "<=", "<"}
-VALID_QUOTA_METRICS = {"used", "remaining"}
+# Agents that report a rolling 5-hour window (grok only reports weekly).
+FIVE_HOUR_AGENTS = {"claude", "codex", "agy"}
 VALID_ON_UNKNOWN = {"skip", "run"}
 
 
@@ -68,21 +67,60 @@ class MinRerunInterval:
 
 
 @dataclass
-class QuotaCondition:
-    """Run only when the task's own agent's quota meets this threshold.
+class QuotaClause:
+    """One cell of the quota-condition grid.
 
-    The agent is always ``task.agent`` — there is no separate picker.
+    ``value`` is a percent for the ``*_used`` clauses and a number of hours
+    for the ``*_reset`` clauses.
     """
 
-    window: str = "weekly"       # weekly | 5h | any | all
-    comparator: str = ">="       # >= | > | <= | <
-    percent: float = 90.0
-    metric: str = "used"         # used | remaining
+    enabled: bool = False
+    value: float = 0.0
+
+
+# (attr, window label, kind, short label) for every grid cell, in UI order.
+QUOTA_CLAUSES: tuple[tuple[str, str, str, str], ...] = (
+    ("weekly_used", "weekly", "used", "wk used"),
+    ("weekly_reset", "weekly", "reset", "wk resets"),
+    ("fivehour_used", "5h", "used", "5h used"),
+    ("fivehour_reset", "5h", "reset", "5h resets"),
+)
+
+
+@dataclass
+class QuotaCondition:
+    """Run only when the task's own agent's quota meets ALL checked clauses.
+
+    A 2x2 grid — {weekly, 5-hour} x {used %, resets within N hours}. Only
+    the enabled clauses are AND-ed. The agent is always ``task.agent``.
+    Operators are fixed: ``used`` is ``>=`` a percent, ``reset`` is ``<=``
+    a number of hours until the window refreshes.
+    """
+
+    weekly_used: QuotaClause = field(default_factory=lambda: QuotaClause(False, 90.0))
+    weekly_reset: QuotaClause = field(default_factory=lambda: QuotaClause(False, 24.0))
+    fivehour_used: QuotaClause = field(default_factory=lambda: QuotaClause(False, 90.0))
+    fivehour_reset: QuotaClause = field(default_factory=lambda: QuotaClause(False, 3.0))
     on_unknown: str = "skip"     # skip | run  (when quota can't be read)
 
+    def active(self) -> list[tuple[str, str, str, float]]:
+        """[(short label, window, kind, value), ...] for the enabled clauses."""
+        out = []
+        for attr, window, kind, label in QUOTA_CLAUSES:
+            clause: QuotaClause = getattr(self, attr)
+            if clause.enabled:
+                out.append((label, window, kind, clause.value))
+        return out
+
+    def uses_five_hour(self) -> bool:
+        return self.fivehour_used.enabled or self.fivehour_reset.enabled
+
     def describe(self, agent: str) -> str:
-        w = {"any": "5h/wk", "all": "5h&wk"}.get(self.window, self.window)
-        return f"{agent} {w} {self.metric} {self.comparator} {self.percent:g}%"
+        parts = [
+            f"{label}{'≥' if kind == 'used' else '≤'}{value:g}{'%' if kind == 'used' else 'h'}"
+            for label, _w, kind, value in self.active()
+        ]
+        return f"{agent}: " + (" & ".join(parts) if parts else "(no clause)")
 
 
 @dataclass
@@ -103,6 +141,87 @@ class Task:
     artifact_extensions: list[str] = field(default_factory=lambda: [".md"])
     min_rerun_interval: MinRerunInterval = field(default_factory=MinRerunInterval)
     quota_condition: QuotaCondition | None = None
+
+
+def _clause_from_dict(raw: Any, task_id: str, attr: str, kind: str) -> QuotaClause:
+    if not raw:
+        default = 90.0 if kind == "used" else (24.0 if attr == "weekly_reset" else 3.0)
+        return QuotaClause(False, default)
+    if not isinstance(raw, dict):
+        raise ConfigError(f"task '{task_id}': quota_condition.{attr} must be a mapping")
+    try:
+        value = float(raw.get("value", 0.0))
+    except (TypeError, ValueError):
+        raise ConfigError(
+            f"task '{task_id}': quota_condition.{attr}.value must be a number"
+        ) from None
+    enabled = bool(raw.get("enabled", False))
+    if enabled and kind == "used" and not 0.0 <= value <= 100.0:
+        raise ConfigError(
+            f"task '{task_id}': quota_condition.{attr}.value {value} out of range 0–100"
+        )
+    if enabled and kind == "reset" and value <= 0:
+        raise ConfigError(
+            f"task '{task_id}': quota_condition.{attr}.value must be > 0 hours (got {value})"
+        )
+    return QuotaClause(enabled, value)
+
+
+def _quota_condition_from_dict(
+    qc_data: Any, task_id: str, agent: str
+) -> QuotaCondition | None:
+    if not qc_data:
+        return None
+    if not isinstance(qc_data, dict):
+        raise ConfigError(f"task '{task_id}': quota_condition must be a mapping")
+    if agent not in QUOTA_CAPABLE_AGENTS:
+        raise ConfigError(
+            f"task '{task_id}': quota_condition needs a quota-capable agent "
+            f"({', '.join(sorted(QUOTA_CAPABLE_AGENTS))}), not {agent!r}"
+        )
+
+    on_unknown = str(qc_data.get("on_unknown", "skip"))
+    if on_unknown not in VALID_ON_UNKNOWN:
+        raise ConfigError(
+            f"task '{task_id}': invalid quota_condition.on_unknown {on_unknown!r} "
+            f"(use one of {', '.join(sorted(VALID_ON_UNKNOWN))})"
+        )
+
+    # Back-compat: the first cut used a flat {window, percent, ...} shape.
+    if "value" not in qc_data and ("window" in qc_data or "percent" in qc_data):
+        pct = float(qc_data.get("percent", 90.0))
+        win = str(qc_data.get("window", "weekly"))
+        legacy = {"on_unknown": on_unknown}
+        if win in ("weekly", "any", "all"):
+            legacy["weekly_used"] = {"enabled": True, "value": pct}
+        if win in ("5h", "any", "all"):
+            legacy["fivehour_used"] = {"enabled": True, "value": pct}
+        qc_data = legacy
+
+    cond = QuotaCondition(
+        weekly_used=_clause_from_dict(qc_data.get("weekly_used"), task_id, "weekly_used", "used"),
+        weekly_reset=_clause_from_dict(
+            qc_data.get("weekly_reset"), task_id, "weekly_reset", "reset"
+        ),
+        fivehour_used=_clause_from_dict(
+            qc_data.get("fivehour_used"), task_id, "fivehour_used", "used"
+        ),
+        fivehour_reset=_clause_from_dict(
+            qc_data.get("fivehour_reset"), task_id, "fivehour_reset", "reset"
+        ),
+        on_unknown=on_unknown,
+    )
+    if not cond.active():
+        raise ConfigError(
+            f"task '{task_id}': quota_condition needs at least one enabled clause "
+            f"(weekly_used, weekly_reset, fivehour_used, fivehour_reset)"
+        )
+    if cond.uses_five_hour() and agent not in FIVE_HOUR_AGENTS:
+        raise ConfigError(
+            f"task '{task_id}': {agent!r} only reports a weekly window — "
+            f"remove the 5-hour clause(s)"
+        )
+    return cond
 
 
 def task_from_dict(data: dict[str, Any]) -> Task:
@@ -151,52 +270,8 @@ def task_from_dict(data: dict[str, Any]) -> Task:
         hours=mri_hours,
     )
 
-    qc_data = data.get("quota_condition")
-    quota_condition = None
     agent = str(data.get("agent", "opencode"))
-    if qc_data:
-        if agent not in QUOTA_CAPABLE_AGENTS:
-            raise ConfigError(
-                f"task '{data['id']}': quota_condition needs a quota-capable agent "
-                f"({', '.join(sorted(QUOTA_CAPABLE_AGENTS))}), not {agent!r}"
-            )
-        window = str(qc_data.get("window", "weekly"))
-        comparator = str(qc_data.get("comparator", ">="))
-        metric = str(qc_data.get("metric", "used"))
-        on_unknown = str(qc_data.get("on_unknown", "skip"))
-        if window not in VALID_QUOTA_WINDOWS:
-            raise ConfigError(f"task '{data['id']}': invalid quota_condition.window {window!r}")
-        if comparator not in VALID_COMPARATORS:
-            raise ConfigError(
-                f"task '{data['id']}': invalid quota_condition.comparator {comparator!r}"
-            )
-        if metric not in VALID_QUOTA_METRICS:
-            raise ConfigError(
-                f"task '{data['id']}': invalid quota_condition.metric {metric!r} "
-                f"(use one of {', '.join(sorted(VALID_QUOTA_METRICS))})"
-            )
-        if on_unknown not in VALID_ON_UNKNOWN:
-            raise ConfigError(
-                f"task '{data['id']}': invalid quota_condition.on_unknown {on_unknown!r} "
-                f"(use one of {', '.join(sorted(VALID_ON_UNKNOWN))})"
-            )
-        try:
-            percent = float(qc_data.get("percent", 90.0))
-        except (TypeError, ValueError):
-            raise ConfigError(
-                f"task '{data['id']}': quota_condition.percent must be a number"
-            ) from None
-        if not 0.0 <= percent <= 100.0:
-            raise ConfigError(
-                f"task '{data['id']}': quota_condition.percent {percent} out of range 0–100"
-            )
-        quota_condition = QuotaCondition(
-            window=window,
-            comparator=comparator,
-            percent=percent,
-            metric=metric,
-            on_unknown=on_unknown,
-        )
+    quota_condition = _quota_condition_from_dict(data.get("quota_condition"), data["id"], agent)
 
     if schedule.mode == "quota":
         if quota_condition is None:
@@ -256,17 +331,17 @@ def task_to_dict(task: Task) -> dict[str, Any]:
             "hours": task.min_rerun_interval.hours,
         },
         "quota_condition": (
-            None
-            if task.quota_condition is None
-            else {
-                "window": task.quota_condition.window,
-                "comparator": task.quota_condition.comparator,
-                "percent": task.quota_condition.percent,
-                "metric": task.quota_condition.metric,
-                "on_unknown": task.quota_condition.on_unknown,
-            }
+            None if task.quota_condition is None else _quota_condition_to_dict(task.quota_condition)
         ),
     }
+
+
+def _quota_condition_to_dict(c: QuotaCondition) -> dict[str, Any]:
+    out: dict[str, Any] = {"on_unknown": c.on_unknown}
+    for attr, _window, _kind, _label in QUOTA_CLAUSES:
+        clause: QuotaClause = getattr(c, attr)
+        out[attr] = {"enabled": clause.enabled, "value": clause.value}
+    return out
 
 
 # ---------------------------------------------------------------------------
