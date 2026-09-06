@@ -214,24 +214,87 @@ def cmd_quota(args: argparse.Namespace) -> int:
         print(json.dumps({r.agent: r.to_dict() for r in results}, indent=2, ensure_ascii=False))
         return 0
 
-    print(f"{'AGENT':<8} {'PLAN':<8} {'WINDOW':<9} {'USED':>6} {'RESETS IN':>10}")
-    print("-" * 48)
+    import time as _t
+
+    def _age(r):
+        if not r.observed_at:
+            return ""
+        s = int(max(0, _t.time() - r.observed_at))
+        return f"{s // 60}m ago" if s >= 60 else f"{s}s ago"
+
+    print(f"{'AGENT':<8} {'SOURCE':<13} {'WINDOW':<9} {'USED':>6} {'RESETS IN':>10}  AGE")
+    print("-" * 62)
     for r in results:
         if not r.available:
-            print(f"{r.agent:<8} {'—':<8} {'—':<9} {'—':>6} {'—':>10}   ({r.error})")
+            print(f"{r.agent:<8} {r.source:<13} {'—':<9} {'—':>6} {'—':>10}      ({r.error})")
             continue
-        if not r.windows:
-            print(f"{r.agent:<8} {(r.plan or '—'):<8} (no windows reported)")
         for i, w in enumerate(r.windows):
             agent_c = r.agent if i == 0 else ""
-            plan_c = (r.plan or "—") if i == 0 else ""
+            src_c = r.source if i == 0 else ""
+            age_c = _age(r) if i == 0 else ""
             used = f"{w.used_percent:.0f}%" if w.used_percent is not None else "—"
             print(
-                f"{agent_c:<8} {plan_c:<8} {w.label:<9} {used:>6} "
-                f"{fmt_reset(w.seconds_until_reset):>10}"
+                f"{agent_c:<8} {src_c:<13} {w.label:<9} {used:>6} "
+                f"{fmt_reset(w.seconds_until_reset):>10}  {age_c}"
             )
-        if r.note:
-            print(f"{'':<8} {'':<8} · {r.note}")
+        tags = " · ".join(x for x in (r.plan, r.note) if x)
+        if tags:
+            print(f"{'':<8} {'':<13} · {tags}")
+    return 0
+
+
+def cmd_quota_sink(args: argparse.Namespace) -> int:
+    from .quota_sink import run
+
+    return run([args.agent] + (["--chain", args.chain] if args.chain else []))
+
+
+def cmd_quota_sink_setup(args: argparse.Namespace) -> int:
+    """Show (or, with --write, apply) the statusLine hook wiring for an agent."""
+    import base64
+    import json as _json
+    from pathlib import Path
+
+    cfgs = {
+        "claude": Path.home() / ".claude" / "settings.json",
+        "agy": Path.home() / ".gemini" / "antigravity-cli" / "settings.json",
+    }
+    path = cfgs[args.agent]
+    exe = _mdrunner_executable_for_scheduler()
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError) as exc:
+        print(f"could not read {path}: {exc}", file=sys.stderr)
+        return 2
+    prev = ((data.get("statusLine") or {}).get("command") or "").strip()
+
+    if args.remove:
+        # unwrap: pull the chained command back out
+        if "quota-sink" in prev and "--chain" in prev:
+            b64 = prev.split("--chain", 1)[1].strip().strip("'\"").split()[0]
+            try:
+                prev = base64.b64decode(b64).decode("utf-8")
+            except Exception:  # noqa: BLE001
+                prev = ""
+        new_cmd = prev
+    else:
+        chain = f" --chain {base64.b64encode(prev.encode()).decode()}" if prev else ""
+        new_cmd = f'"{exe}" quota-sink {args.agent}{chain}'
+
+    print(f"settings file : {path}")
+    print(f"current       : {prev or '(none)'}")
+    print(f"new statusLine : {new_cmd or '(cleared)'}")
+    if not args.write:
+        print("\n(dry run — re-run with --write to apply; a .bak is kept)")
+        return 0
+    if path.exists():
+        path.with_suffix(".json.bak").write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    data.setdefault("statusLine", {})
+    data["statusLine"]["type"] = "command"
+    data["statusLine"]["command"] = new_cmd
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+    print(f"\napplied. backup: {path.with_suffix('.json.bak')}")
     return 0
 
 
@@ -443,6 +506,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--agents", default="", help="comma-separated subset (default: settings.quota_poll.agents)"
     )
     p_quota.set_defaults(func=cmd_quota)
+
+    p_qsink = sub.add_parser("quota-sink", help="statusLine hook: capture an agent's rate-limit JSON")
+    p_qsink.add_argument("agent", choices=("claude", "agy"))
+    p_qsink.add_argument("--chain", default="", help="base64 of the status line command to run next")
+    p_qsink.set_defaults(func=cmd_quota_sink)
+
+    p_qsetup = sub.add_parser("quota-sink-setup", help="wire quota-sink into an agent's settings.json")
+    p_qsetup.add_argument("agent", choices=("claude", "agy"))
+    p_qsetup.add_argument("--write", action="store_true", help="apply (default: dry run)")
+    p_qsetup.add_argument("--remove", action="store_true", help="unwire it")
+    p_qsetup.set_defaults(func=cmd_quota_sink_setup)
 
     p_qsched = sub.add_parser(
         "quota-schedule", help="install/remove the periodic quota-poll systemd timer"

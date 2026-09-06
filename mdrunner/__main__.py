@@ -30,6 +30,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "health",
         "quota",
         "quota-schedule",
+        "quota-sink",
+        "quota-sink-setup",
         "init",
         "schedule-install",
         "schedule-uninstall",

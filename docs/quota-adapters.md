@@ -17,15 +17,21 @@ the weekly window as `primary`.)
 
 ## Status per vendor (2026-09)
 
-| Vendor | Quota source | Confidence | Implemented |
-|--------|--------------|------------|-------------|
-| **codex** | `codex app-server` JSON-RPC → `account/rateLimits/read` (same call the TUI `/status` makes; an account read, **not** an inference call). | authoritative | ✅ |
-| **claude** | No `claude usage --json`. `mdrunner/_ptyusage.py` spawns `claude` on a PTY, answers the trust prompt, sends `/usage`, strips ANSI, and regexes the *Current session* / *Current week* blocks (`_CLAUDE_BLOCK_RE`). Reset strings (`2:10pm` / `Sep 12, 11pm` + tz) → timestamp via `zoneinfo`. | estimated | ✅ (PTY) |
-| **agy** (Antigravity) | `/usage` (per model group: weekly + five-hour, % remaining + "Refreshes in Xh Ym") is TUI-only, backed by `RetrieveUserQuotaSummary`. PTY-scrape of the **GEMINI MODELS** group (`_AGY_LIMIT_RE`); `used = 100 − remaining`. A `RetrieveUserQuotaSummary` helper would upgrade this to authoritative. | estimated | ✅ (PTY) |
-| **grok** | Grok Build logs `msg == "billing: fetched credits config"` to `$GROK_HOME/logs/unified.jsonl` with `ctx.config.creditUsagePercent` + `currentPeriod.{type,end}` — exactly used% + reset, no auth. `_probe_grok` tails that log; if the last entry is older than 5 min it sends `/usage` on a PTY (which makes grok re-fetch) and re-reads the *log*, so a TUI layout change can't break it. | authoritative (fresh) / estimated (stale) | ✅ |
+`QuotaResult` carries **`source`** (how authoritative the data is: `api` /
+`statusline` / `billing-log` / `screen-scrape` / `none`) separately from
+**`observed_at`** (how fresh) and `confidence`. Raw `window_minutes` is kept;
+the `weekly` / `5h` label is only a hint. `account` is a short hash of the
+signed-in account so a stale value is never carried across an account switch.
+
+| Vendor | Primary source | Fallback | `source` |
+|--------|----------------|----------|----------|
+| **codex** | `codex app-server` JSON-RPC -> `account/rateLimits/read`, preferring `rateLimitsByLimitId["codex"]` then `rateLimits`. Account read, not inference. `rateLimitResetCredits.availableCount` is authoritative for the credit count. | - | `api` |
+| **claude** | `mdrunner quota-sink claude` - a `statusLine.command` hook that captures Claude Code's own `rate_limits.{five_hour,seven_day}` JSON to `<state>/quota-sink/claude.json`. Instant, no PTY, no tokens. Wire it with `mdrunner quota-sink-setup claude --write` (chains any existing status line). | PTY `/usage` scrape when the sink file is missing/stale | `statusline` -> `screen-scrape` |
+| **agy** (Antigravity) | `mdrunner quota-sink agy` - captures `quota.<bucket>.{remaining_fraction,reset_time}` (`used = (1 - remaining_fraction) * 100`, `reset_time` verbatim). | PTY `/usage` scrape of the GEMINI MODELS group | `statusline` -> `screen-scrape` |
+| **grok** | Reverse-scan `$GROK_HOME/logs/unified.jsonl` for the last `billing: fetched credits config`. `creditUsagePercent` is Optional - fall back to legacy `used/monthlyLimit`, else `used_percent = None` (never 0). If the entry is > 5 min old, send `/usage` on a PTY and only accept the refresh if a newer billing line appears (read the log, not the screen). | last known snapshot, marked stale | `billing-log` |
 
 To add one, implement `_probe_<agent>(binary) -> QuotaResult` and register it
-in `_DISPATCH`. Nothing else changes — the CLI, the poller, and the GUI panel
+in `_DISPATCH`. Nothing else changes - the CLI, the poller, and the GUI panel
 all read `QuotaResult`.
 
 ## Scheduled polling

@@ -20,11 +20,12 @@ from mdrunner.quota import (
 
 @pytest.fixture(autouse=True)
 def _no_real_probes(monkeypatch, tmp_path):
-    """Never touch a real agent CLI or a real ~/.grok log during tests."""
+    """Never touch a real agent CLI / ~/.grok log / statusLine sink."""
     import mdrunner._ptyusage as pty
 
     monkeypatch.setattr(pty, "capture_screen", lambda *a, **k: "")
     monkeypatch.setenv("GROK_HOME", str(tmp_path / "no-grok"))  # empty -> unavailable
+    monkeypatch.setenv("RUNCHER_STATE_DIR", str(tmp_path / "state"))  # no quota-sink files
 
 
 def test_window_label():
@@ -85,6 +86,65 @@ def test_grok_missing_log_is_unavailable(monkeypatch, tmp_path):
     monkeypatch.setenv("GROK_HOME", str(tmp_path / "nope"))
     r = quota._probe_grok("grok")
     assert not r.available and "billing snapshot" in r.error
+
+
+def test_grok_missing_usage_percent_is_none_not_zero(monkeypatch, tmp_path):
+    log = tmp_path / "gh" / "logs" / "unified.jsonl"
+    log.parent.mkdir(parents=True)
+    fresh = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    log.write_text(
+        '{"ts":"' + fresh + '","msg":"billing: fetched credits config","ctx":{"config":{'
+        '"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2099-01-01T00:00:00Z"},'
+        '"isUnifiedBillingUser":true},"subscriptionTier":"SuperGrok"}}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GROK_HOME", str(tmp_path / "gh"))
+    r = quota._probe_grok("grok")
+    assert r.available  # we still have a reset time
+    assert r.windows[0].used_percent is None  # NOT 0.0
+    assert r.confidence == "estimated"
+    assert "not in snapshot" in r.note
+
+
+def test_quota_sink_extracts_claude_and_agy():
+    from mdrunner import quota_sink
+
+    c = quota_sink._extract_claude(
+        {"rate_limits": {"five_hour": {"used_percentage": 20, "resets_at": 111},
+                         "seven_day": {"used_percentage": 55, "resets_at": 222}},
+         "subscription": "Max"}
+    )
+    assert c["plan"] == "Max"
+    assert {(w["label"], w["used_percent"]) for w in c["windows"]} == {("5h", 20.0), ("weekly", 55.0)}
+
+    a = quota_sink._extract_agy(
+        {"quota": {"gemini-weekly": {"remaining_fraction": 0.75,
+                                     "reset_time": "2099-01-01T00:00:00Z"},
+                   "gemini-five-hour": {"remaining_fraction": 1.0, "reset_in_seconds": 3600}},
+         "plan_tier": "Pro", "email": "x@y.z"}
+    )
+    aw = {w["label"]: w for w in a["windows"]}
+    assert aw["weekly"]["used_percent"] == 25.0
+    assert aw["5h"]["used_percent"] == 0.0 and aw["5h"]["resets_at"] is not None
+    assert a["plan"] == "Pro" and a["account"]
+
+
+def test_quota_sink_reads_back_via_probe(monkeypatch, tmp_path):
+    import io
+    import sys as _sys
+
+    from mdrunner import quota_sink
+
+    monkeypatch.setenv("RUNCHER_STATE_DIR", str(tmp_path / "st"))
+    monkeypatch.setattr(
+        _sys, "stdin",
+        type("S", (), {"buffer": io.BytesIO(
+            b'{"rate_limits":{"seven_day":{"used_percentage":88,"resets_at":9}}}')})(),
+    )
+    assert quota_sink.run(["claude"]) == 0  # acts as the statusLine hook
+    r = quota._probe_claude("claude")       # now reads the file, no PTY
+    assert r.available and r.source == "statusline"
+    assert r.windows[0].used_percent == 88.0
 
 
 def test_claude_agy_parsers_on_sample_text():
