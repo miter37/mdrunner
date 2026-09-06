@@ -347,7 +347,7 @@ def _parse_claude_usage(text: str) -> list[QuotaWindow]:
     return windows
 
 
-def _probe_claude(binary: str, timeout: float = 28.0) -> QuotaResult:
+def _probe_claude(binary: str, timeout: float = 30.0) -> QuotaResult:
     path = _resolve_cli(binary)
     if path is None:
         return QuotaResult("claude", False, error=f"binary {binary!r} not on PATH")
@@ -355,28 +355,35 @@ def _probe_claude(binary: str, timeout: float = 28.0) -> QuotaResult:
 
     if not _ptyusage.supported():
         return QuotaResult("claude", False, error="PTY scrape unsupported on this platform")
-    # Claude may open a "trust this folder?" prompt on a fresh session (default
-    # choice is "No, exit") — arrow-down to "Yes, I trust" + Enter. If there's
-    # no prompt those keys land harmlessly in the input box. Each step waits
-    # for the screen to be ready rather than a fixed sleep.
-    text = _ptyusage.capture_screen(
-        [path],
-        cwd=os.path.expanduser("~"),
-        steps=[
-            (("await", r"trust this folder|for shortcuts|Try \"|>\s", 12.0), "\x1b[B"),
-            (0.4, "\r"),
-            (("await", r"for shortcuts|Try \"|\?\s+for", 12.0), "/usage"),
-            (0.35, "\r"),
-            (1.6, "\r"),
-        ],
-        # only stop once a fully-painted, parseable weekly line is on screen
-        stop_when=r"Current\s+week[^\n]*\n[^\n]*?\d+\s*%\s*used",
-        total_seconds=timeout,
-    )
-    windows = _parse_claude_usage(text)
+
+    def _once() -> tuple:
+        # Claude may open a "trust this folder?" prompt (default "No, exit") —
+        # arrow-down to "Yes, I trust" + Enter; harmless keystrokes otherwise.
+        # Steps wait for the screen to be ready instead of a fixed sleep.
+        text = _ptyusage.capture_screen(
+            [path],
+            cwd=os.path.expanduser("~"),
+            steps=[
+                (("await", r"trust this folder|for shortcuts|Try \"|>\s", 14.0), "\x1b[B"),
+                (0.4, "\r"),
+                (("await", r"for shortcuts|Try \"|\?\s+for", 14.0), "/usage"),
+                (0.35, "\r"),
+                (1.6, "\r"),
+            ],
+            stop_when=r"Current\s+week[^\n]*\n[^\n]*?\d+\s*%\s*used",
+            total_seconds=timeout,
+        )
+        return _parse_claude_usage(text), text
+
+    windows: list[QuotaWindow] = []
+    text = ""
+    for _ in range(2):
+        windows, text = _once()
+        if windows:
+            break
     if not windows:
         return QuotaResult(
-            "claude", False, error="could not parse /usage screen (format changed?)"
+            "claude", False, error="could not parse /usage screen (busy? format changed?)"
         )
     return QuotaResult(
         "claude",

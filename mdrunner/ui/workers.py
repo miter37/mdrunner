@@ -197,20 +197,26 @@ class QuotaFetchWorker(QThread):
         self.results_ready = self.signals.results_ready
 
     def run(self) -> None:
-        import json
         import subprocess
         import sys
 
         try:
-            proc = subprocess.run(
-                [sys.executable, "-m", "mdrunner", "quota", "--json", "--write",
+            subprocess.run(
+                [sys.executable, "-m", "mdrunner", "quota", "--write",
                  "--agents", ",".join(self.agent_ids)],
                 capture_output=True,
                 text=True,
                 timeout=180,
             )
-            data = json.loads(proc.stdout or "{}")
-            self.signals.results_ready.emit(list(data.values()))
+        except Exception:  # noqa: BLE001
+            pass
+        # Read back the snapshot the child just wrote — it carries a working
+        # agent's last-good value forward if this round's probe missed.
+        try:
+            from ..quota import load_snapshot
+
+            agents = load_snapshot().get("agents", {})
+            self.signals.results_ready.emit(list(agents.values()))
         except Exception:  # noqa: BLE001
             self.signals.results_ready.emit([])
 
