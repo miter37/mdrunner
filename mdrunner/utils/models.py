@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 import subprocess
 import shutil
 import json
@@ -57,6 +58,26 @@ def fetch_agent_models(agent_id: str, binary_path: str | None = None) -> list[st
             "grok-4.20-multi-agent-0309",
         ]
 
+    # 2b) Grok: `grok models` prints a decorated list ("  - id" / "  * id (default)")
+    if agent_id == "grok":
+        resolved = shutil.which(binary)
+        if resolved:
+            try:
+                res = subprocess.run(
+                    [resolved, "models"], capture_output=True, text=True, timeout=5
+                )
+                if res.returncode == 0:
+                    found: list[str] = []
+                    for line in res.stdout.splitlines():
+                        m = re.match(r"\s*[-*]\s+(\S+)", line)
+                        if m:
+                            found.append(m.group(1))
+                    if found:
+                        return found
+            except Exception:
+                pass
+        return ["grok-4.6", "grok-4.5"]
+
     # 3) opencode / agy: dynamic via `<binary> models`
     if agent_id in ("opencode", "agy"):
         resolved = shutil.which(binary)
@@ -69,9 +90,16 @@ def fetch_agent_models(agent_id: str, binary_path: str | None = None) -> list[st
                     timeout=5,
                 )
                 if res.returncode == 0:
-                    lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
-                    if lines:
-                        return lines
+                    out = []
+                    for line in res.stdout.splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        # `agy models` prints "<id>\t<Human Name>"; the CLI's
+                        # --model flag wants the human name.
+                        out.append(line.split("\t", 1)[-1].strip() if "\t" in line else line)
+                    if out:
+                        return list(dict.fromkeys(out))
             except Exception:
                 pass
         # Dynamic failed — minimal fallback so the dropdown isn't empty

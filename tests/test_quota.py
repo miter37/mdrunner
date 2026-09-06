@@ -1,0 +1,195 @@
+import stat
+import time
+from pathlib import Path
+
+import pytest
+
+from mdrunner import quota
+from mdrunner.config import settings_from_dict, settings_to_dict
+from mdrunner.quota import (
+    QuotaResult,
+    QuotaWindow,
+    _window_label,
+    fmt_reset,
+    load_snapshot,
+    probe_quota,
+    quota_summary,
+    save_snapshot,
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_pty(monkeypatch):
+    """Never spawn a real agent CLI during tests — stub the PTY scraper so
+    claude/agy probes resolve instantly to 'unavailable'."""
+    import mdrunner._ptyusage as pty
+
+    monkeypatch.setattr(pty, "capture_screen", lambda *a, **k: "")
+
+
+def test_window_label():
+    assert _window_label(300) == "5h"
+    assert _window_label(10080) == "weekly"
+    assert _window_label(720) == "12h"
+    assert _window_label(2880) == "2d"
+    assert _window_label(None) == "window"
+
+
+def test_fmt_reset():
+    assert fmt_reset(None) == "—"
+    assert fmt_reset(0) == "0m"
+    assert fmt_reset(90) == "1m"
+    assert fmt_reset(3 * 3600 + 20 * 60) == "3h 20m"
+    assert fmt_reset(2 * 86400 + 5 * 3600) == "2d 5h"
+
+
+def test_seconds_until_reset():
+    w = QuotaWindow("weekly", used_percent=40, resets_at=time.time() + 3600)
+    assert 3500 < w.seconds_until_reset <= 3600
+    assert QuotaWindow("x").seconds_until_reset is None
+
+
+def test_unavailable_probes_have_confidence():
+    # grok has no source at all; claude/agy fall back to unavailable when the
+    # PTY scrape yields nothing (stubbed empty by the autouse fixture).
+    for agent in ("claude", "grok", "agy"):
+        r = probe_quota(agent)
+        assert r.agent == agent
+        assert r.available is False
+        assert r.confidence == "unavailable"
+        assert r.error
+
+
+def test_claude_agy_parsers_on_sample_text():
+    from mdrunner.quota import _parse_agy_usage, _parse_claude_usage
+
+    claude = (
+        "Current session██ 24%usedResets 2:10pm (Asia/Seoul)"
+        "Current week (all models)█ 2%usedResets Sep 12, 11pm (Asia/Seoul)"
+    )
+    cw = {w.label: w for w in _parse_claude_usage(claude)}
+    assert cw["5h"].used_percent == 24.0
+    assert cw["weekly"].used_percent == 2.0
+    assert cw["5h"].resets_at and cw["weekly"].resets_at
+
+    agy = (
+        "GEMINI MODELS\n Weekly Limit Remaining\n [###] 88.71%\n"
+        " 89% remaining · Refreshes in 115h 39m\n Five Hour Limit Remaining\n"
+        " [###] 89.58%\n 90% remaining · Refreshes in 39m\n"
+        "CLAUDE AND GPT MODELS\n Weekly Limit Remaining\n [###] 100.00%\n Quota available\n"
+    )
+    aw = {w.label: w for w in _parse_agy_usage(agy)}
+    assert aw["weekly"].used_percent == pytest.approx(11.29)
+    assert aw["5h"].used_percent == pytest.approx(10.42)
+    assert aw["5h"].resets_at
+
+
+def test_probe_unknown_agent():
+    r = probe_quota("nope")
+    assert not r.available and "no quota probe" in r.error
+
+
+def test_snapshot_roundtrip(tmp_path: Path):
+    p = tmp_path / "quota.json"
+    results = [
+        QuotaResult(
+            "codex",
+            available=True,
+            confidence="authoritative",
+            plan="plus",
+            windows=[QuotaWindow("weekly", 40, time.time() + 100, 10080)],
+        ),
+        QuotaResult("claude", available=False, error="x"),
+    ]
+    save_snapshot(results, p)
+    snap = load_snapshot(p)
+    assert set(snap["agents"]) == {"codex", "claude"}
+    assert snap["agents"]["codex"]["windows"][0]["label"] == "weekly"
+    assert "generated_at" in snap
+
+
+def test_load_snapshot_missing(tmp_path: Path):
+    assert load_snapshot(tmp_path / "nope.json") == {}
+
+
+def test_quota_poll_config_roundtrip():
+    raw = {
+        "agents": {},
+        "quota_poll": {"enabled": True, "interval_minutes": 45, "agents": ["codex"]},
+    }
+    s = settings_from_dict(raw)
+    assert s.quota_poll.enabled is True
+    assert s.quota_poll.interval_minutes == 45
+    assert s.quota_poll.agents == ["codex"]
+    # default when absent
+    s2 = settings_from_dict({"agents": {}})
+    assert s2.quota_poll.enabled is False
+    assert s2.quota_poll.interval_minutes == 180
+    # survives to_dict -> from_dict
+    assert settings_from_dict(settings_to_dict(s)).quota_poll.interval_minutes == 45
+
+
+# --- codex probe against a fake app-server -----------------------------------
+
+FAKE_APP_SERVER = r"""#!/usr/bin/env python3
+import sys, json
+def readline():
+    return sys.stdin.readline()
+while True:
+    line = readline()
+    if not line:
+        break
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        print(json.dumps({"id": mid, "result": {"codexHome": "/x"}}), flush=True)
+    elif method == "account/rateLimits/read":
+        print(json.dumps({"id": mid, "result": {"rateLimits": {
+            "planType": "plus",
+            "primary": {"usedPercent": 12, "windowDurationMins": 300, "resetsAt": 4102444800},
+            "secondary": {"usedPercent": 63, "windowDurationMins": 10080, "resetsAt": 4102444800}
+        }, "rateLimitResetCredits": {"availableCount": 1}}}), flush=True)
+"""
+
+
+@pytest.fixture()
+def fake_codex(tmp_path: Path) -> str:
+    p = tmp_path / "fakecodex"
+    p.write_text(FAKE_APP_SERVER, encoding="utf-8")
+    p.chmod(p.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return str(p)
+
+
+def test_probe_codex_parses_windows(fake_codex: str):
+    r = quota._probe_codex(fake_codex, timeout=10)
+    assert r.available is True
+    assert r.confidence == "authoritative"
+    assert r.plan == "plus"
+    labels = {w.label: w for w in r.windows}
+    assert labels["5h"].used_percent == 12
+    assert labels["weekly"].used_percent == 63
+    assert labels["weekly"].window_minutes == 10080
+    assert "reset credit" in (r.note or "")
+
+
+def test_probe_codex_binary_missing(tmp_path: Path):
+    r = quota._probe_codex(str(tmp_path / "does-not-exist"))
+    assert r.available is False
+    assert r.confidence == "unavailable"
+
+
+def test_quota_summary_default_agents(monkeypatch):
+    monkeypatch.setattr(quota, "_probe_codex", lambda b, timeout=20.0: QuotaResult(
+        "codex", available=True, confidence="authoritative",
+        windows=[QuotaWindow("weekly", 10, None, 10080)]))
+    rows = quota_summary()
+    assert [r.agent for r in rows] == list(quota.QUOTA_AGENTS)
+    codex_row = next(r for r in rows if r.agent == "codex")
+    assert codex_row.available and codex_row.confidence == "authoritative"

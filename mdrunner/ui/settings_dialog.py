@@ -39,14 +39,16 @@ from ..config import (
     Preset,
     Settings,
 )
+from .theme import style_form
 
 
 class SettingsDialog(QDialog):
     def __init__(self, *, parent, settings: Settings) -> None:
         super().__init__(parent)
         self.settings = copy.deepcopy(settings)
-        self.setWindowTitle("mdrunner — Settings")
-        self.resize(820, 600)
+        self.setWindowTitle("Preferences")
+        self.resize(800, 640)
+        self.setMinimumSize(700, 520)
 
         self.tabs = QTabWidget(self)
         self.tabs.addTab(self._build_agents_tab(), "Agent CLIs")
@@ -54,6 +56,8 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(self._build_notifications_tab(), "Notifications")
 
         outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 16, 16, 12)
+        outer.setSpacing(12)
         outer.addWidget(self.tabs)
 
         buttons = QDialogButtonBox(
@@ -69,6 +73,8 @@ class SettingsDialog(QDialog):
     def _build_agents_tab(self) -> QWidget:
         w = QWidget(self)
         layout = QHBoxLayout(w)
+        layout.setContentsMargins(6, 10, 6, 6)
+        layout.setSpacing(14)
 
         # Left: list of agents
         left = QVBoxLayout()
@@ -84,6 +90,7 @@ class SettingsDialog(QDialog):
         left.addWidget(self.agent_list, 1)
 
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
         self.btn_add_agent = QPushButton("Add…", left_w)
         self.btn_add_agent.clicked.connect(self._on_add_agent)
         btn_row.addWidget(self.btn_add_agent)
@@ -92,16 +99,18 @@ class SettingsDialog(QDialog):
         btn_row.addWidget(self.btn_remove_agent)
 
         self.btn_up_agent = QPushButton("▲", left_w)
+        self.btn_up_agent.setFixedWidth(34)
         self.btn_up_agent.clicked.connect(self._on_move_agent_up)
         btn_row.addWidget(self.btn_up_agent)
         self.btn_down_agent = QPushButton("▼", left_w)
+        self.btn_down_agent.setFixedWidth(34)
         self.btn_down_agent.clicked.connect(self._on_move_agent_down)
         btn_row.addWidget(self.btn_down_agent)
 
-        self.btn_health = QPushButton("Run Health Check", left_w)
-        self.btn_health.clicked.connect(self._on_health_button)
-        btn_row.addWidget(self.btn_health)
         left.addLayout(btn_row)
+        self.btn_health = QPushButton("Run health check", left_w)
+        self.btn_health.clicked.connect(self._on_health_button)
+        left.addWidget(self.btn_health)
 
         layout.addWidget(left_w, 1)
 
@@ -113,6 +122,7 @@ class SettingsDialog(QDialog):
         # Binary + default model + health cmd
         gb1 = QGroupBox("Identity", right_w)
         f1 = QFormLayout(gb1)
+        style_form(f1)
         self.in_binary = QLineEdit(gb1)
         btn_detect = QPushButton("Detect", gb1)
         btn_detect.clicked.connect(self._on_detect_binary)
@@ -134,6 +144,7 @@ class SettingsDialog(QDialog):
         # Bypass
         gb2 = QGroupBox("Bypass flags (auto-approve on scheduled run)", right_w)
         f2 = QFormLayout(gb2)
+        style_form(f2)
         self.in_bypass_sched = QLineEdit(gb2)
         f2.addRow("Scheduled (cron)", self.in_bypass_sched)
         self.in_bypass_manual = QLineEdit(gb2)
@@ -142,7 +153,9 @@ class SettingsDialog(QDialog):
 
         # Presets
         gb3 = QGroupBox("Extra args presets", right_w)
+        gb3.setMinimumHeight(170)
         v3 = QVBoxLayout(gb3)
+        v3.setSpacing(8)
         self.preset_table = QTableWidget(0, 2, gb3)
         self.preset_table.setHorizontalHeaderLabels(["Name", "Args"])
         self.preset_table.horizontalHeader().setSectionResizeMode(
@@ -150,8 +163,10 @@ class SettingsDialog(QDialog):
         )
         self.preset_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.preset_table.verticalHeader().setVisible(False)
+        self.preset_table.setMinimumHeight(96)
         v3.addWidget(self.preset_table)
         preset_btn_row = QHBoxLayout()
+        preset_btn_row.setSpacing(6)
         self.btn_add_preset = QPushButton("Add", gb3)
         self.btn_add_preset.clicked.connect(self._on_add_preset)
         self.btn_edit_preset = QPushButton("Edit", gb3)
@@ -168,7 +183,7 @@ class SettingsDialog(QDialog):
         # Health result panel
         self.health_result = QPlainTextEdit(right_w)
         self.health_result.setReadOnly(True)
-        self.health_result.setMaximumHeight(120)
+        self.health_result.setFixedHeight(88)
         self.health_result.setPlaceholderText("(health check result will appear here)")
         right.addWidget(self.health_result)
 
@@ -425,6 +440,7 @@ class SettingsDialog(QDialog):
     def _build_defaults_tab(self) -> QWidget:
         w = QWidget(self)
         f = QFormLayout(w)
+        style_form(f)
         self.in_default_timeout = QSpinBox(w)
         self.in_default_timeout.setRange(1, 24 * 60)
         self.in_default_timeout.setSuffix(" min")
@@ -444,6 +460,18 @@ class SettingsDialog(QDialog):
         self.in_artifact_window.setValue(self.settings.defaults.artifact_time_window_seconds)
         f.addRow("Result Time Window", self.in_artifact_window)
 
+        # --- Quota polling (systemd timer that runs `mdrunner quota --write`) ---
+        qp = getattr(self.settings, "quota_poll", None)
+        self.in_quota_enabled = QCheckBox("Poll agent quota on a timer", w)
+        self.in_quota_enabled.setChecked(bool(qp and qp.enabled))
+        f.addRow("Quota polling", self.in_quota_enabled)
+
+        self.in_quota_interval = QSpinBox(w)
+        self.in_quota_interval.setRange(15, 24 * 60)
+        self.in_quota_interval.setSuffix(" min")
+        self.in_quota_interval.setValue(qp.interval_minutes if qp else 180)
+        f.addRow("Poll every", self.in_quota_interval)
+
         return w
 
     # =================================================== Notifications tab
@@ -451,6 +479,7 @@ class SettingsDialog(QDialog):
     def _build_notifications_tab(self) -> QWidget:
         w = QWidget(self)
         f = QFormLayout(w)
+        style_form(f)
         self.in_tg_token = QLineEdit(w)
         self.in_tg_token.setEchoMode(QLineEdit.EchoMode.Password)
         f.addRow("Telegram bot token", self.in_tg_token)
@@ -474,6 +503,29 @@ class SettingsDialog(QDialog):
         note.setWordWrap(True)
         f.addRow(note)
         return w
+
+    def _apply_quota_timer(self, qp) -> None:
+        """Install / remove the mdrunner-quota-poll systemd user timer."""
+        import sys
+
+        if not sys.platform.startswith("linux"):
+            return
+        try:
+            from ..cli import _mdrunner_executable_for_scheduler
+            from ..scheduler.linux import LinuxScheduler
+
+            sched = LinuxScheduler()
+            if qp.enabled:
+                sched.install_quota_poll(
+                    qp.interval_minutes, _mdrunner_executable_for_scheduler()
+                )
+            else:
+                sched.uninstall_quota_poll()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(
+                self, "Quota timer",
+                f"Saved the setting, but the systemd timer step failed:\n\n{exc}",
+            )
 
     # =================================================== Save
 
@@ -516,6 +568,18 @@ class SettingsDialog(QDialog):
             artifact_markers=markers,
             artifact_time_window_seconds=self.in_artifact_window.value(),
         )
+
+        # Quota polling — persist the setting and (un)install the systemd timer.
+        from ..config import QuotaPoll
+
+        qp_prev = getattr(self.settings, "quota_poll", QuotaPoll())
+        self.settings.quota_poll = QuotaPoll(
+            enabled=self.in_quota_enabled.isChecked(),
+            interval_minutes=self.in_quota_interval.value(),
+            agents=list(qp_prev.agents),
+        )
+        self._apply_quota_timer(self.settings.quota_poll)
+
         # Telegram settings stored in a small sidecar file (Phase 4)
         from . import _telegram_settings
 

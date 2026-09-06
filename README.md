@@ -10,8 +10,9 @@ the saved-file marker, and reports the result.
 
 Three delivery modes:
 
-- **Headless CLI** — `mdrunner list | preview | run | validate | health | init | schedule-install …`
-- **GUI** — `mdrunner` (launches a PySide6 desktop window)
+- **Headless CLI** — `mdrunner list | preview | run | validate | health | quota | init | schedule-install …`
+- **GUI** — `mdrunner` (launches a PySide6 desktop window; light / dark / system
+  theme under **View → Theme**)
 - **Frozen binary** — `dist/mdrunner` (or `dist\mdrunner.exe`), single file, no Python required
 
 ## Install
@@ -75,8 +76,11 @@ uv run mdrunner run <task-id>
 uv run mdrunner schedule-install <task-id>
 
 # 6) Launch the GUI
-uv run mdrunner
+uv run mdrunner --gui       # or just: ./run_gui.sh
 ```
+
+`mdrunner` / `run.sh` with no arguments prints CLI help (so it never hangs
+on a headless box). `./run_gui.sh` always starts the desktop window.
 
 ## Project layout
 
@@ -92,17 +96,26 @@ mdrunner/
 │   ├── config.py                     # tasks.yaml + settings.yaml
 │   ├── runner.py                     # subprocess + lock + timeout + log capture
 │   ├── health.py                     # binary + version probe
+│   ├── prompts.py                    # save GUI-authored instructions as md
+│   ├── quota.py                      # per-agent usage-quota adapters
 │   ├── telegram.py                   # optional failure notifications
 │   ├── agents/
 │   │   ├── base.py
 │   │   ├── opencode.py
 │   │   ├── codex.py
-│   │   └── openclaw.py
+│   │   ├── openclaw.py
+│   │   ├── claude.py
+│   │   ├── agy.py
+│   │   ├── hermes.py
+│   │   └── grok.py
 │   ├── scheduler/
 │   │   ├── base.py
 │   │   ├── linux.py                  # systemd user timer
 │   │   └── windows.py                # Task Scheduler (schtasks)
 │   ├── ui/                           # PySide6 GUI
+│   │   ├── theme.py                  # Fusion + QSS design system (light/dark)
+│   │   ├── icons.py                  # painter-drawn line icons (no icon font)
+│   │   ├── delegates.py              # status-pill + two-line name painting
 │   │   ├── main_window.py
 │   │   ├── task_dialog.py
 │   │   ├── settings_dialog.py
@@ -162,8 +175,14 @@ mdrunner/
 | `openclaw` | (install separately) | (none configured) | `agent --local` | `--local` | `--message-file` ✓ |
 | `claude` | `claude` | `glm-5.2` | `-p` | `--dangerously-skip-permissions` | (inline only) |
 | `agy` | `agy` | `Gemini 3.5 Flash (Medium)` | `-p` | `--dangerously-skip-permissions` | (inline only) |
+| `hermes` | `hermes` | (CLI default) | `chat -q` | `--yolo` | (inline only) |
+| `grok` | `grok` | (CLI default) | `--prompt-file` / `-p` | `--permission-mode bypassPermissions` | `--prompt-file` ✓ |
 
-**Verify available models:** `agy models`, `claude --models`, `opencode models`, `codex --models`.
+**Verify available models:** `agy models`, `claude --models`, `opencode models`, `codex --models`, `grok models`.
+
+Adding an agent CLI in a later update? Run `mdrunner init` again — it leaves
+your existing `settings.yaml` untouched but appends any newly-shipped agent
+blocks (reported as `update: … (added agents: …)`).
 Use `mdrunner preview <task-id>` to see the exact argv that will be invoked.
 
 ## Build the frozen binary
@@ -192,6 +211,24 @@ Auto-created by `mdrunner init`. Each agent has a `default_model`, `health_cmd`,
 
 Override location: `RUNCHER_CONFIG_DIR=/some/path`.
 Log directory override: `RUNCHER_LOG_DIR=/some/path`.
+User-data directory override: `RUNCHER_DATA_DIR=/some/path`.
+
+### Inline prompts (`<data>/mdrunner/prompts/`)
+
+In the GUI's Add/Edit task dialog, **Prompt source** can be set to
+**Write inline** instead of pointing at an existing file. What you type is
+saved as a Markdown file in the app's user-data folder and registered as
+that task's `prompt_file`:
+
+| OS | Folder |
+|----|--------|
+| Linux | `~/.local/share/mdrunner/prompts/` |
+| macOS | `~/Library/Application Support/mdrunner/prompts/` |
+| Windows | `%LOCALAPPDATA%\mdrunner\prompts\` |
+
+Files are named `<task-name-slug>-<YYYYMMDD-HHMMSS>.md`. Re-opening such a
+task loads its text back into the editor and **saves over the same file**
+on accept, so the path stored in `tasks.yaml` stays stable.
 
 ### `~/.config/mdrunner/tasks.yaml`
 
@@ -214,6 +251,44 @@ One entry per task. Key fields:
 | `extra_args` | Free-form list passed to the agent CLI |
 | `timeout_minutes` | `0` = no timeout |
 | `on_failure.notify` | Send a Telegram message on failure (bot must be configured) |
+
+### Agent quota (`mdrunner quota`)
+
+Reports each subscription CLI's usage limits — rolling 5-hour window, weekly
+window, % used, and time until reset.
+
+```bash
+mdrunner quota                    # table
+mdrunner quota --json --write     # machine-readable + save snapshot for the GUI
+mdrunner quota-schedule install   # systemd user timer (interval from settings.yaml)
+mdrunner quota-schedule status
+mdrunner quota-schedule uninstall
+```
+
+There is no universal source, so each vendor has its own token-free adapter
+(none of these consume model tokens):
+
+| Vendor | Source | State |
+|--------|--------|-------|
+| `codex` | `codex app-server` → `account/rateLimits/read` | ✅ authoritative |
+| `claude` | PTY-scrape the interactive `/usage` screen (session + week % + reset) | ✅ estimated |
+| `agy` | PTY-scrape `/usage` (GEMINI MODELS group: weekly + 5-hour) | ✅ estimated |
+| `grok` | needs a `grok usage-json` helper (its `/usage` billing handler) | ⏳ stub |
+
+The PTY scrapers spawn the real CLI for ~30 s and read its `/usage` panel
+(an account read — no model tokens). They are best-effort: a screen-format
+change makes the probe return `unavailable`, never wrong data. Linux/macOS
+only.
+
+See `docs/quota-adapters.md`. The GUI's **Agent Quota** dock shows the latest
+snapshot and re-probes on demand. Configure polling in `settings.yaml`:
+
+```yaml
+quota_poll:
+  enabled: false
+  interval_minutes: 180
+  agents: [claude, codex, agy, grok]
+```
 
 ### `~/.config/mdrunner/telegram.json`
 

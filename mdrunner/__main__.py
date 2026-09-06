@@ -28,6 +28,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "run",
         "validate",
         "health",
+        "quota",
+        "quota-schedule",
         "init",
         "schedule-install",
         "schedule-uninstall",
