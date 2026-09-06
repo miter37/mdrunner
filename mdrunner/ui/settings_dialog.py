@@ -460,16 +460,16 @@ class SettingsDialog(QDialog):
         self.in_artifact_window.setValue(self.settings.defaults.artifact_time_window_seconds)
         f.addRow("Result Time Window", self.in_artifact_window)
 
-        # --- Quota polling (systemd timer that runs `mdrunner quota --write`) ---
+        # --- Quota polling (systemd timer that runs `mdrunner quota-tick`) ---
         qp = getattr(self.settings, "quota_poll", None)
         self.in_quota_enabled = QCheckBox("Poll agent quota on a timer", w)
         self.in_quota_enabled.setChecked(bool(qp and qp.enabled))
         f.addRow("Quota polling", self.in_quota_enabled)
 
         self.in_quota_interval = QSpinBox(w)
-        self.in_quota_interval.setRange(15, 24 * 60)
+        self.in_quota_interval.setRange(5, 24 * 60)
         self.in_quota_interval.setSuffix(" min")
-        self.in_quota_interval.setValue(qp.interval_minutes if qp else 180)
+        self.in_quota_interval.setValue(qp.interval_minutes if qp else 10)
         f.addRow("Poll every", self.in_quota_interval)
 
         return w

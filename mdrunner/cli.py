@@ -99,6 +99,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             mode=args.mode,
             settings=settings,
             timeout_override=args.timeout,
+            force_run=getattr(args, "force", False),
         )
     except LockBusyError as exc:
         print(f"locked: {exc}", file=sys.stderr)
@@ -106,6 +107,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     except KeyError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+
+    if result.skipped:
+        print(f"\n[skip] {result.task_id}: {result.skip_reason}")
+        return 0
 
     duration = result.duration_seconds
     print()
@@ -179,6 +184,39 @@ def cmd_validate(args: argparse.Namespace) -> int:
         if not t.prompt_file:
             print(f"  warn: task {t.id!r} has empty prompt_file")
             warnings += 1
+        if t.quota_condition is not None:
+            print(
+                f"  note: task {t.id!r} has a quota condition "
+                f"({t.quota_condition.describe(t.agent)})"
+            )
+        if t.schedule.mode == "quota" and t.enabled:
+            try:
+                from .scheduler.base import current as _sched
+
+                sched = _sched()
+                installed = (
+                    hasattr(sched, "quota_poll_installed") and sched.quota_poll_installed()
+                )
+                every = (
+                    getattr(sched, "quota_poll_interval_minutes", lambda: None)()
+                    if installed
+                    else None
+                )
+            except Exception as exc:  # noqa: BLE001 — introspection must not fail validate
+                installed, every = None, None
+                print(f"  note: task {t.id!r} is quota-triggered (scheduler check skipped: {exc})")
+            if installed:
+                print(
+                    f"  note: task {t.id!r} is quota-triggered; poll timer is installed"
+                    + (f" (every ~{every}m)" if every else "")
+                )
+            elif installed is False:
+                print(
+                    f"  warn: task {t.id!r} is quota-triggered but the quota-poll timer "
+                    f"is NOT installed — it will never run. Install it with:  "
+                    f"mdrunner quota-schedule install"
+                )
+                warnings += 1
     rows = health_summary(settings)
     print()
     print(f"{'AGENT':<12} {'OK':<5} {'PATH':<35} VERSION")
@@ -298,6 +336,63 @@ def cmd_quota_sink_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_quota_tick(args: argparse.Namespace) -> int:
+    """Refresh the quota snapshot, then run any quota-triggered task whose
+    condition is now met (and whose min-rerun interval has elapsed)."""
+    from .quota import load_snapshot, quota_summary, save_snapshot
+    from .quota_gate import check_task_gate
+    from .runner import last_real_run_at, run_task
+
+    settings = load_settings(settings_file())
+
+    try:
+        tasks = load_tasks(tasks_file())
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
+
+    conditional = [
+        t for t in tasks if t.schedule.mode == "quota" and t.enabled and t.quota_condition
+    ]
+
+    # Refresh the configured poll set, but always include the agents that
+    # quota-triggered tasks actually depend on so their gate reads fresh data.
+    if args.agents:
+        base = [a.strip() for a in args.agents.split(",") if a.strip()]
+    else:
+        base = list(settings.quota_poll.agents)
+    probe = list(dict.fromkeys(base + [t.agent for t in conditional]))
+    results = quota_summary(probe)
+    save_snapshot(results)
+    snap = load_snapshot()
+    if not conditional:
+        print("quota-tick: snapshot refreshed; no quota-triggered tasks", file=sys.stderr)
+        return 0
+
+    ran = skipped = 0
+    for t in conditional:
+        d = check_task_gate(t, last_run_at=last_real_run_at(t.id), snapshot=snap)
+        if not d.allowed:
+            skipped += 1
+            print(f"  skip  {t.id}  ({d.reason})")
+            continue
+        if args.dry_run:
+            print(f"  WOULD RUN  {t.id}  ({d.reason})")
+            ran += 1
+            continue
+        print(f"  run   {t.id}  ({d.reason})")
+        try:
+            res = run_task(t.id, mode="scheduled", settings=settings)
+            state = "ok" if res.ok else ("skip" if res.skipped else "fail")
+            print(f"        → {state}"
+                  + (f" ({res.skip_reason or res.error})" if state != "ok" else ""))
+            ran += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"        → error: {exc}")
+    print(f"quota-tick: {ran} run, {skipped} skipped", file=sys.stderr)
+    return 0
+
+
 def cmd_quota_schedule(args: argparse.Namespace) -> int:
     from .scheduler.base import current
 
@@ -397,6 +492,13 @@ def cmd_schedule_install(args: argparse.Namespace) -> int:
 
     tasks = load_tasks(tasks_file())
     task = find_task(tasks, args.task_id)
+    if task.schedule.mode == "quota":
+        print(
+            f"task {task.id!r} is quota-triggered (no time schedule) — it runs via "
+            f"the quota poll timer.\nEnable it with:  mdrunner quota-schedule install",
+            file=sys.stderr,
+        )
+        return 2
     if not task.enabled:
         ans = input(f"task {task.id!r} is disabled — install anyway? [y/N] ")
         if ans.strip().lower() != "y":
@@ -491,6 +593,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="override task timeout in minutes (0 = no limit)",
     )
+    p_run.add_argument(
+        "--force", action="store_true",
+        help="run even if the min-rerun-interval / quota-condition gate says skip",
+    )
     p_run.set_defaults(func=cmd_run)
 
     p_validate = sub.add_parser("validate", help="validate config + run health check")
@@ -517,6 +623,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_qsetup.add_argument("--write", action="store_true", help="apply (default: dry run)")
     p_qsetup.add_argument("--remove", action="store_true", help="unwire it")
     p_qsetup.set_defaults(func=cmd_quota_sink_setup)
+
+    p_qtick = sub.add_parser(
+        "quota-tick", help="refresh quota + fire quota-triggered tasks (the poll timer runs this)"
+    )
+    p_qtick.add_argument("--dry-run", action="store_true", help="evaluate only, run nothing")
+    p_qtick.add_argument("--agents", default="", help="comma-separated subset to refresh")
+    p_qtick.set_defaults(func=cmd_quota_tick)
 
     p_qsched = sub.add_parser(
         "quota-schedule", help="install/remove the periodic quota-poll systemd timer"

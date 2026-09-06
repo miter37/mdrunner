@@ -524,16 +524,37 @@ class MainWindow(QMainWindow):
         self._start_task_run(task, mode="manual")
 
     def _install_schedule_for(self, task: Task) -> None:
+        from ..cli import _mdrunner_executable_for_scheduler
+
+        sched = current_scheduler()
+        # quota-triggered tasks have no OS timer — they run via the quota poll.
+        if task.schedule.mode == "quota":
+            try:
+                sched.uninstall(task)  # remove a stale time-based timer if any
+            except Exception:  # noqa: BLE001
+                pass
+            if task.enabled and hasattr(sched, "install_quota_poll") and not sched.quota_poll_installed():
+                try:
+                    sched.install_quota_poll(
+                        self.settings.quota_poll.interval_minutes,
+                        _mdrunner_executable_for_scheduler(),
+                    )
+                    self.status_msg.setText("Quota poll timer installed (10 min)")
+                except Exception as exc:  # noqa: BLE001
+                    QMessageBox.warning(
+                        self, "Quota poll timer",
+                        f"Task saved, but the quota poll timer failed to install:\n\n{exc}\n\n"
+                        f"Install it with:  mdrunner quota-schedule install",
+                    )
+            return
         if not task.enabled:
             try:
-                current_scheduler().uninstall(task)
+                sched.uninstall(task)
             except Exception:  # noqa: BLE001
                 pass
             return
         try:
-            from ..cli import _mdrunner_executable_for_scheduler
-
-            current_scheduler().install(task, _mdrunner_executable_for_scheduler())
+            sched.install(task, _mdrunner_executable_for_scheduler())
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(
                 self, "Couldn't schedule the task",
@@ -763,6 +784,18 @@ class MainWindow(QMainWindow):
         self._run_worker = None
         tid = result_payload["task_id"]
         ok = result_payload["ok"]
+        skipped = result_payload.get("skipped")
+        if skipped:
+            reason = result_payload.get("skip_reason") or "gate not satisfied"
+            self._set_row_status(tid, ("warn", "skipped"))
+            self.status_msg.setText(f"Skipped: '{tid}' — {reason}")
+            for row, t in enumerate(self.tasks):
+                if t.id == tid:
+                    self.table.item(row, COL_LAST_RUN).setText(
+                        _dt.datetime.now().strftime("%m-%d %H:%M")
+                    )
+                    break
+            return
         self._set_row_status(tid, ("ok", "ok") if ok else ("err", "failed"))
         self.status_msg.setText(
             f"{'Done' if ok else 'Failed'}: '{tid}' in {result_payload['duration']:.1f}s"
@@ -812,15 +845,31 @@ def _fmt_days(days: list[str]) -> str:
 
 def _format_schedule(t: Task) -> str:
     s = t.schedule
+    if s.mode == "quota":
+        base = _quota_condition_tag(t) or "quota"
+        mrr = t.min_rerun_interval
+        return f"{base} · ≥{mrr.hours:g}h apart" if mrr.enabled else base
     if s.mode == "once":
-        return f"once · {s.time}"
-    if s.mode == "daily":
-        return f"daily · {s.time}"
-    if s.mode == "weekly":
-        return f"{_fmt_days(s.days)} · {s.time}"
-    if s.mode == "interval":
-        return f"every {s.interval_minutes}m"
-    return s.mode
+        base = f"once · {s.time}"
+    elif s.mode == "daily":
+        base = f"daily · {s.time}"
+    elif s.mode == "weekly":
+        base = f"{_fmt_days(s.days)} · {s.time}"
+    elif s.mode == "interval":
+        base = f"every {s.interval_minutes}m"
+    else:
+        base = s.mode
+    tag = _quota_condition_tag(t)
+    return f"{base}  +  {tag}" if tag else base
+
+
+def _quota_condition_tag(t: Task) -> str:
+    """Compact gate/trigger label, e.g. ``codex wk used≥90%``."""
+    c = t.quota_condition
+    if c is None:
+        return ""
+    win = {"weekly": "wk", "5h": "5h", "any": "5h/wk", "all": "5h&wk"}.get(c.window, c.window)
+    return f"{t.agent} {win} {c.metric}{c.comparator}{c.percent:g}%"
 
 
 def _format_last_run(t: Task) -> str:
@@ -838,6 +887,8 @@ def _estimate_next_run(t: Task) -> Optional[str]:
     s = t.schedule
     if s.mode == "once":
         return "—"
+    if s.mode == "quota":
+        return "on quota"
     if s.mode == "interval":
         return f"~{s.interval_minutes}m"
     if s.mode == "daily":

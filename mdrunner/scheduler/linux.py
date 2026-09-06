@@ -190,7 +190,7 @@ class LinuxScheduler:
         service_text = (
             "[Unit]\nDescription=mdrunner agent-quota poll\n\n"
             "[Service]\nType=oneshot\n"
-            f"ExecStart={mdrunner_executable} quota --write\n"
+            f"ExecStart={mdrunner_executable} quota-tick\n"
         )
         timer_text = (
             "[Unit]\nDescription=Poll agent quota every "

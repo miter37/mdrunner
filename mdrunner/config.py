@@ -27,7 +27,13 @@ class ConfigError(ValueError):
 # ---------------------------------------------------------------------------
 
 VALID_WEEKDAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
-VALID_SCHEDULE_MODES = {"once", "daily", "weekly", "interval"}
+# "quota" = no time trigger; the quota-tick poller evaluates the condition.
+VALID_SCHEDULE_MODES = {"once", "daily", "weekly", "interval", "quota"}
+QUOTA_CAPABLE_AGENTS = {"claude", "codex", "agy", "grok"}
+VALID_QUOTA_WINDOWS = {"weekly", "5h", "any", "all"}
+VALID_COMPARATORS = {">=", ">", "<=", "<"}
+VALID_QUOTA_METRICS = {"used", "remaining"}
+VALID_ON_UNKNOWN = {"skip", "run"}
 
 
 def _schedule_time_from_yaml(value: Any) -> str:
@@ -53,6 +59,33 @@ class OnFailure:
 
 
 @dataclass
+class MinRerunInterval:
+    """Floor on how often a task may actually run, across every trigger
+    (time schedule and quota trigger). Manual "Run now" bypasses it."""
+
+    enabled: bool = True
+    hours: float = 6.0
+
+
+@dataclass
+class QuotaCondition:
+    """Run only when the task's own agent's quota meets this threshold.
+
+    The agent is always ``task.agent`` — there is no separate picker.
+    """
+
+    window: str = "weekly"       # weekly | 5h | any | all
+    comparator: str = ">="       # >= | > | <= | <
+    percent: float = 90.0
+    metric: str = "used"         # used | remaining
+    on_unknown: str = "skip"     # skip | run  (when quota can't be read)
+
+    def describe(self, agent: str) -> str:
+        w = {"any": "5h/wk", "all": "5h&wk"}.get(self.window, self.window)
+        return f"{agent} {w} {self.metric} {self.comparator} {self.percent:g}%"
+
+
+@dataclass
 class Task:
     id: str
     name: str
@@ -68,6 +101,8 @@ class Task:
     notify_artifact: bool = False
     artifact_dir: str | None = None
     artifact_extensions: list[str] = field(default_factory=lambda: [".md"])
+    min_rerun_interval: MinRerunInterval = field(default_factory=MinRerunInterval)
+    quota_condition: QuotaCondition | None = None
 
 
 def task_from_dict(data: dict[str, Any]) -> Task:
@@ -99,6 +134,81 @@ def task_from_dict(data: dict[str, Any]) -> Task:
     on_failure = OnFailure(
         notify=bool(on_fail_data.get("notify", False)),
     )
+
+    mri_data = data.get("min_rerun_interval") or {}
+    try:
+        mri_hours = float(mri_data.get("hours", 6.0))
+    except (TypeError, ValueError):
+        raise ConfigError(
+            f"task '{data['id']}': min_rerun_interval.hours must be a number"
+        ) from None
+    if mri_hours <= 0:
+        raise ConfigError(
+            f"task '{data['id']}': min_rerun_interval.hours must be > 0 (got {mri_hours})"
+        )
+    min_rerun = MinRerunInterval(
+        enabled=bool(mri_data.get("enabled", True)),
+        hours=mri_hours,
+    )
+
+    qc_data = data.get("quota_condition")
+    quota_condition = None
+    agent = str(data.get("agent", "opencode"))
+    if qc_data:
+        if agent not in QUOTA_CAPABLE_AGENTS:
+            raise ConfigError(
+                f"task '{data['id']}': quota_condition needs a quota-capable agent "
+                f"({', '.join(sorted(QUOTA_CAPABLE_AGENTS))}), not {agent!r}"
+            )
+        window = str(qc_data.get("window", "weekly"))
+        comparator = str(qc_data.get("comparator", ">="))
+        metric = str(qc_data.get("metric", "used"))
+        on_unknown = str(qc_data.get("on_unknown", "skip"))
+        if window not in VALID_QUOTA_WINDOWS:
+            raise ConfigError(f"task '{data['id']}': invalid quota_condition.window {window!r}")
+        if comparator not in VALID_COMPARATORS:
+            raise ConfigError(
+                f"task '{data['id']}': invalid quota_condition.comparator {comparator!r}"
+            )
+        if metric not in VALID_QUOTA_METRICS:
+            raise ConfigError(
+                f"task '{data['id']}': invalid quota_condition.metric {metric!r} "
+                f"(use one of {', '.join(sorted(VALID_QUOTA_METRICS))})"
+            )
+        if on_unknown not in VALID_ON_UNKNOWN:
+            raise ConfigError(
+                f"task '{data['id']}': invalid quota_condition.on_unknown {on_unknown!r} "
+                f"(use one of {', '.join(sorted(VALID_ON_UNKNOWN))})"
+            )
+        try:
+            percent = float(qc_data.get("percent", 90.0))
+        except (TypeError, ValueError):
+            raise ConfigError(
+                f"task '{data['id']}': quota_condition.percent must be a number"
+            ) from None
+        if not 0.0 <= percent <= 100.0:
+            raise ConfigError(
+                f"task '{data['id']}': quota_condition.percent {percent} out of range 0–100"
+            )
+        quota_condition = QuotaCondition(
+            window=window,
+            comparator=comparator,
+            percent=percent,
+            metric=metric,
+            on_unknown=on_unknown,
+        )
+
+    if schedule.mode == "quota":
+        if quota_condition is None:
+            raise ConfigError(
+                f"task '{data['id']}': schedule.mode 'quota' needs a quota_condition"
+            )
+        if not min_rerun.enabled:
+            raise ConfigError(
+                f"task '{data['id']}': a quota-triggered task must set "
+                f"min_rerun_interval.enabled = true"
+            )
+
     return Task(
         id=str(data["id"]),
         name=str(data["name"]),
@@ -114,6 +224,8 @@ def task_from_dict(data: dict[str, Any]) -> Task:
         notify_artifact=bool(data.get("notify_artifact", False)),
         artifact_dir=(str(data["artifact_dir"]) if data.get("artifact_dir") else None),
         artifact_extensions=[str(x) for x in data.get("artifact_extensions", [".md"])],
+        min_rerun_interval=min_rerun,
+        quota_condition=quota_condition,
     )
 
 
@@ -139,6 +251,21 @@ def task_to_dict(task: Task) -> dict[str, Any]:
         "notify_artifact": task.notify_artifact,
         "artifact_dir": task.artifact_dir,
         "artifact_extensions": task.artifact_extensions,
+        "min_rerun_interval": {
+            "enabled": task.min_rerun_interval.enabled,
+            "hours": task.min_rerun_interval.hours,
+        },
+        "quota_condition": (
+            None
+            if task.quota_condition is None
+            else {
+                "window": task.quota_condition.window,
+                "comparator": task.quota_condition.comparator,
+                "percent": task.quota_condition.percent,
+                "metric": task.quota_condition.metric,
+                "on_unknown": task.quota_condition.on_unknown,
+            }
+        ),
     }
 
 
@@ -178,10 +305,12 @@ class Defaults:
 
 @dataclass
 class QuotaPoll:
-    """Settings for the periodic agent-quota poller (systemd user timer)."""
+    """The periodic quota poller (`mdrunner quota-tick`): refreshes the quota
+    snapshot every ``interval_minutes`` and then fires any quota-triggered
+    tasks whose condition is now met."""
 
     enabled: bool = False
-    interval_minutes: int = 180
+    interval_minutes: int = 10
     agents: list[str] = field(
         default_factory=lambda: ["claude", "codex", "agy", "grok"]
     )
@@ -245,7 +374,7 @@ def settings_from_dict(data: dict[str, Any]) -> Settings:
     qp_data = data.get("quota_poll") or {}
     quota_poll = QuotaPoll(
         enabled=bool(qp_data.get("enabled", False)),
-        interval_minutes=int(qp_data.get("interval_minutes", 180)),
+        interval_minutes=int(qp_data.get("interval_minutes", 10)),
         agents=[str(x) for x in qp_data.get("agents", ["claude", "codex", "agy", "grok"])],
     )
     return Settings(agents=agents, defaults=defaults, quota_poll=quota_poll)

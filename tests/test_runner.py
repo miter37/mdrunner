@@ -86,6 +86,7 @@ def config_paths(
 ) -> tuple[Path, Path]:
     monkeypatch.setenv("RUNCHER_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("RUNCHER_LOG_DIR", str(tmp_path / "log"))
+    monkeypatch.setenv("RUNCHER_STATE_DIR", str(tmp_path / "state"))
     (tmp_path / "cfg").mkdir()
     (tmp_path / "log").mkdir()
     return (tmp_path / "cfg" / "tasks.yaml", tmp_path / "cfg" / "settings.yaml")
@@ -134,6 +135,8 @@ def write_task(
                 "working_dir": str(workdir) if workdir else None,
                 "extra_args": extra or [],
                 "timeout_minutes": timeout,
+                # runner tests aren't about the gate — keep the old behaviour
+                "min_rerun_interval": {"enabled": False},
             }
         ]
     }
@@ -729,3 +732,145 @@ def test_send_artifacts_integration_fallback_outside_window(
         assert not result.ok
         assert result.error and "no artifact file found" in result.error
         assert mock_send.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Run gate: min re-run interval
+# ---------------------------------------------------------------------------
+
+
+def _write_gated_task(p: Path, prompt: Path, workdir: Path) -> None:
+    import yaml
+
+    raw = {
+        "tasks": [
+            {
+                "id": "t",
+                "name": "T",
+                "enabled": True,
+                "agent": "fake",
+                "prompt_file": str(prompt),
+                "working_dir": str(workdir),
+                "timeout_minutes": 2,
+                "min_rerun_interval": {"enabled": True, "hours": 6},
+            }
+        ]
+    }
+    p.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+
+def test_scheduled_run_skipped_within_min_rerun(
+    tmp_path: Path, fake_agent_dir: Path, config_paths
+) -> None:
+    tasks_p, settings_p = config_paths
+    prompt = tmp_path / "p.md"
+    prompt.write_text("hi", encoding="utf-8")
+    write_settings(settings_p)
+    _write_gated_task(tasks_p, prompt, tmp_path)
+    settings = load_settings(settings_p)
+
+    r1 = run_task(
+        "t", mode="scheduled", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+    )
+    assert r1.ok and not r1.skipped
+
+    r2 = run_task(
+        "t", mode="scheduled", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+    )
+    assert r2.skipped
+    assert "min re-run interval" in (r2.skip_reason or "")
+
+    # --force bypasses the gate
+    r3 = run_task(
+        "t",
+        mode="scheduled",
+        settings=settings,
+        tasks_file=tasks_p,
+        settings_file=settings_p,
+        force_run=True,
+    )
+    assert r3.ok and not r3.skipped
+
+
+def test_manual_run_ignores_min_rerun(
+    tmp_path: Path, fake_agent_dir: Path, config_paths
+) -> None:
+    tasks_p, settings_p = config_paths
+    prompt = tmp_path / "p.md"
+    prompt.write_text("hi", encoding="utf-8")
+    write_settings(settings_p)
+    _write_gated_task(tasks_p, prompt, tmp_path)
+    settings = load_settings(settings_p)
+
+    run_task("t", mode="scheduled", settings=settings, tasks_file=tasks_p, settings_file=settings_p)
+    r = run_task(
+        "t", mode="manual", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+    )
+    assert r.ok and not r.skipped
+
+
+def test_skip_does_not_advance_last_run(
+    tmp_path: Path, fake_agent_dir: Path, config_paths
+) -> None:
+    """A skip must not push the min-rerun deadline forward."""
+    from mdrunner.runner import last_real_run_at
+
+    tasks_p, settings_p = config_paths
+    prompt = tmp_path / "p.md"
+    prompt.write_text("hi", encoding="utf-8")
+    write_settings(settings_p)
+    _write_gated_task(tasks_p, prompt, tmp_path)
+    settings = load_settings(settings_p)
+
+    run_task("t", mode="scheduled", settings=settings, tasks_file=tasks_p, settings_file=settings_p)
+    first_stamp = last_real_run_at("t")
+    assert first_stamp is not None
+
+    # a skipped scheduled run
+    r = run_task(
+        "t", mode="scheduled", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+    )
+    assert r.skipped
+    assert last_real_run_at("t") == first_stamp  # unchanged
+
+
+def test_interval_task_reruns_despite_default_min_rerun(
+    tmp_path: Path, fake_agent_dir: Path, config_paths
+) -> None:
+    """A 5-min interval task must not be throttled by the default 6h min-rerun."""
+    import yaml
+
+    tasks_p, settings_p = config_paths
+    prompt = tmp_path / "p.md"
+    prompt.write_text("hi", encoding="utf-8")
+    write_settings(settings_p)
+    tasks_p.write_text(
+        yaml.safe_dump(
+            {
+                "tasks": [
+                    {
+                        "id": "t",
+                        "name": "T",
+                        "enabled": True,
+                        "agent": "fake",
+                        "prompt_file": str(prompt),
+                        "working_dir": str(tmp_path),
+                        "timeout_minutes": 2,
+                        "schedule": {"mode": "interval", "interval_minutes": 5},
+                        "min_rerun_interval": {"enabled": True, "hours": 6},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = load_settings(settings_p)
+
+    r1 = run_task(
+        "t", mode="scheduled", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+    )
+    r2 = run_task(
+        "t", mode="scheduled", settings=settings, tasks_file=tasks_p, settings_file=settings_p
+    )
+    assert r1.ok and not r1.skipped
+    assert r2.ok and not r2.skipped

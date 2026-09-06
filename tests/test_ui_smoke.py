@@ -583,3 +583,161 @@ def test_settings_dialog_detect_binary_fallback(app_and_window, monkeypatch) -> 
 
     dlg.deleteLater()
 
+
+
+def _seed_quota_settings() -> None:
+    """opencode (no quota) + codex (quota-capable) so the quota-condition UI
+    can be exercised both ways."""
+    import yaml
+
+    from mdrunner.utils.paths import settings_file
+
+    settings_file().parent.mkdir(parents=True, exist_ok=True)
+    settings_file().write_text(
+        yaml.safe_dump(
+            {
+                "agents": {
+                    "codex": {
+                        "enabled": True,
+                        "binary": "codex",
+                        "default_model": "",
+                        "health_cmd": ["codex", "--version"],
+                        "bypass": {"scheduled": [], "manual": []},
+                        "presets": [],
+                    },
+                    "opencode": {
+                        "enabled": True,
+                        "binary": "opencode",
+                        "default_model": "minimax-coding-plan/MiniMax-M3",
+                        "health_cmd": ["opencode", "--version"],
+                        "bypass": {"scheduled": ["--auto"], "manual": []},
+                        "presets": [],
+                    },
+                },
+                "defaults": {"timeout_minutes": 5},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.gui
+def test_task_dialog_quota_mode_locks_run_limits(app_and_window) -> None:
+    _app, win = app_and_window
+    from mdrunner.ui.task_dialog import TaskDialog
+
+    _seed_quota_settings()
+    win.refresh_all()
+
+    dlg = TaskDialog(parent=win, settings=win.settings, task=None)
+    dlg.in_agent.setCurrentText("codex")
+    dlg.in_mode.setCurrentIndex(dlg.in_mode.findData("quota"))
+
+    # both gates forced on + locked
+    assert dlg.in_qc_enabled.isChecked() and not dlg.in_qc_enabled.isEnabled()
+    assert dlg.in_mrr_enabled.isChecked() and not dlg.in_mrr_enabled.isEnabled()
+    # time / days disabled in quota mode
+    assert not dlg.in_time.isEnabled()
+    assert all(not cb.isEnabled() for cb in dlg.day_checks.values())
+    # codex reports both windows → any/all offered
+    wins = {dlg.in_qc_window.itemData(i) for i in range(dlg.in_qc_window.count())}
+    assert {"weekly", "5h", "any", "all"} <= wins
+
+    dlg.deleteLater()
+
+
+@pytest.mark.gui
+def test_task_dialog_quota_condition_saves_and_reloads(app_and_window) -> None:
+    _app, win = app_and_window
+    from mdrunner.config import load_tasks
+    from mdrunner.ui.task_dialog import TaskDialog
+    from mdrunner.utils.paths import tasks_file
+
+    _seed_quota_settings()
+    win.refresh_all()
+
+    dlg = TaskDialog(parent=win, settings=win.settings, task=None)
+    dlg.in_name.setText("Quota Trigger Demo")
+    dlg.in_agent.setCurrentText("codex")
+    dlg.in_mode.setCurrentIndex(dlg.in_mode.findData("quota"))
+    dlg.in_qc_window.setCurrentIndex(dlg.in_qc_window.findData("weekly"))
+    dlg.in_qc_percent.setValue(85)
+    dlg.in_prompt_source.setCurrentIndex(dlg.in_prompt_source.findData("inline"))
+    dlg.in_prompt_editor.setPlainText("Do the thing when weekly quota is high.")
+    dlg._on_accept()
+
+    saved = next(t for t in load_tasks(tasks_file()) if t.name == "Quota Trigger Demo")
+    assert saved.schedule.mode == "quota"
+    assert saved.quota_condition is not None
+    assert saved.quota_condition.window == "weekly"
+    assert saved.quota_condition.percent == 85.0
+    assert saved.min_rerun_interval.enabled is True
+
+    dlg2 = TaskDialog(parent=win, settings=win.settings, task=saved)
+    assert dlg2.in_qc_enabled.isChecked()
+    assert dlg2.in_qc_window.currentData() == "weekly"
+    assert dlg2.in_qc_percent.value() == 85
+    dlg.deleteLater()
+    dlg2.deleteLater()
+
+
+@pytest.mark.gui
+def test_task_dialog_quota_condition_hidden_for_non_capable_agent(app_and_window) -> None:
+    _app, win = app_and_window
+    from mdrunner.ui.task_dialog import TaskDialog
+
+    _seed_quota_settings()
+    win.refresh_all()
+
+    dlg = TaskDialog(parent=win, settings=win.settings, task=None)
+    dlg.in_agent.setCurrentText("opencode")
+    # user tries to enable it -> refresh unchecks + disables (opencode has no quota)
+    dlg.in_qc_enabled.setChecked(True)
+    assert not dlg.in_qc_enabled.isChecked()
+    assert not dlg.in_qc_enabled.isEnabled()
+
+    dlg.deleteLater()
+
+
+@pytest.mark.gui
+def test_main_table_shows_quota_condition_tag(app_and_window) -> None:
+    _app, win = app_and_window
+    import yaml
+
+    from mdrunner.utils.paths import tasks_file
+
+    _seed_quota_settings()
+    tasks_file().write_text(
+        yaml.safe_dump(
+            {
+                "tasks": [
+                    {
+                        "id": "gate",
+                        "name": "Gated daily",
+                        "agent": "codex",
+                        "prompt_file": "/tmp/x.md",
+                        "schedule": {"mode": "daily", "time": "02:00"},
+                        "quota_condition": {"window": "weekly", "comparator": ">=", "percent": 90},
+                    },
+                    {
+                        "id": "trig",
+                        "name": "Pure trigger",
+                        "agent": "codex",
+                        "prompt_file": "/tmp/y.md",
+                        "schedule": {"mode": "quota"},
+                        "min_rerun_interval": {"enabled": True, "hours": 6},
+                        "quota_condition": {"window": "5h", "comparator": "<", "percent": 20},
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    win.refresh_all()
+
+    sched_col = 2
+    texts = {win.table.item(r, 0).text(): win.table.item(r, sched_col).text()
+             for r in range(win.table.rowCount())}
+    assert "codex wk used>=90%" in texts["Gated daily"]
+    assert "daily" in texts["Gated daily"]
+    assert texts["Pure trigger"].startswith("codex 5h used<20%")

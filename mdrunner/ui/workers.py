@@ -66,8 +66,8 @@ class TaskRunWorker(QThread):
             )
             return
 
-        # Telegram on failure (best-effort)
-        if not result.ok and self.task.on_failure.notify:
+        # Telegram on failure (best-effort). A gate skip is not a failure.
+        if not result.ok and not result.skipped and self.task.on_failure.notify:
             self._send_telegram_on_failure(result)
 
         self.signals.finished_with_result.emit(
@@ -77,6 +77,8 @@ class TaskRunWorker(QThread):
                 "error": result.error,
                 "duration": result.duration_seconds,
                 "saved_file": result.saved_file,
+                "skipped": result.skipped,
+                "skip_reason": result.skip_reason,
             }
         )
 

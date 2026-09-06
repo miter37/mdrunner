@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -32,13 +33,17 @@ from PySide6.QtWidgets import (
 from .theme import mono_font, style_form
 
 from ..config import (
+    QUOTA_CAPABLE_AGENTS,
+    MinRerunInterval,
     OnFailure,
+    QuotaCondition,
     Schedule,
     Settings,
     Task,
     save_tasks,
 )
 from ..prompts import is_managed_prompt, save_inline_prompt
+from ..quota_gate import available_windows
 from ..utils.paths import prompts_dir, tasks_file
 
 
@@ -225,10 +230,14 @@ class TaskDialog(QDialog):
         fs = QFormLayout(gb_sched)
         self._style_form(fs)
         self.in_mode = QComboBox(gb_sched)
-        for m in ("once", "daily", "weekly", "interval"):
-            self.in_mode.addItem(m)
+        for m, label in (
+            ("once", "once"), ("daily", "daily"), ("weekly", "weekly"),
+            ("interval", "interval (every N min)"),
+            ("quota", "quota (no time — checked every ~10 min)"),
+        ):
+            self.in_mode.addItem(label, m)
         if task:
-            idx = self.in_mode.findText(task.schedule.mode)
+            idx = self.in_mode.findData(task.schedule.mode)
             if idx >= 0:
                 self.in_mode.setCurrentIndex(idx)
         fs.addRow("Mode", self.in_mode)
@@ -280,7 +289,82 @@ class TaskDialog(QDialog):
         self.in_interval.setValue(task.schedule.interval_minutes if task else 60)
         fs.addRow("Interval (interval mode)", self.in_interval)
 
+        # Min re-run interval — a floor on how often the task actually runs.
+        mri = task.min_rerun_interval if task else MinRerunInterval()
+        self.in_mrr_enabled = QCheckBox("Enforce a minimum gap between runs", gb_sched)
+        self.in_mrr_enabled.setChecked(mri.enabled)
+        self.in_mrr_hours = QDoubleSpinBox(gb_sched)
+        self.in_mrr_hours.setRange(0.25, 24 * 30)
+        self.in_mrr_hours.setSingleStep(0.5)
+        self.in_mrr_hours.setDecimals(2)
+        self.in_mrr_hours.setSuffix(" h")
+        self.in_mrr_hours.setValue(mri.hours)
+        mrr_row = QWidget(gb_sched)
+        mrr_lay = QHBoxLayout(mrr_row)
+        mrr_lay.setContentsMargins(0, 0, 0, 0)
+        mrr_lay.setSpacing(8)
+        mrr_lay.addWidget(self.in_mrr_enabled)
+        mrr_lay.addWidget(self.in_mrr_hours)
+        mrr_lay.addStretch(1)
+        fs.addRow("Min re-run interval", mrr_row)
+
         content_lay.addWidget(gb_sched)
+
+        # --- Quota condition ---
+        self.gb_quota = QGroupBox("Quota condition", self)
+        fq = QFormLayout(self.gb_quota)
+        self._style_form(fq)
+        qc = task.quota_condition if task else None
+        self.in_qc_enabled = QCheckBox(
+            "Run only when this task's engine quota meets a condition", self.gb_quota
+        )
+        self.in_qc_enabled.setChecked(qc is not None)
+        fq.addRow("", self.in_qc_enabled)
+
+        self.lbl_qc_engine = QLabel("—", self.gb_quota)
+        self.in_qc_window = QComboBox(self.gb_quota)
+        self.in_qc_comparator = QComboBox(self.gb_quota)
+        for sym, val in (("≥", ">="), (">", ">"), ("≤", "<="), ("<", "<")):
+            self.in_qc_comparator.addItem(sym, val)
+        self.in_qc_percent = QSpinBox(self.gb_quota)
+        self.in_qc_percent.setRange(0, 100)
+        self.in_qc_percent.setSuffix(" %")
+        self.in_qc_percent.setValue(90)
+        self.in_qc_metric = QComboBox(self.gb_quota)
+        self.in_qc_metric.addItems(["used", "remaining"])
+        cond_row = QWidget(self.gb_quota)
+        cr = QHBoxLayout(cond_row)
+        cr.setContentsMargins(0, 0, 0, 0)
+        cr.setSpacing(6)
+        cr.addWidget(self.lbl_qc_engine)
+        cr.addWidget(self.in_qc_window)
+        cr.addWidget(self.in_qc_comparator)
+        cr.addWidget(self.in_qc_percent)
+        cr.addWidget(self.in_qc_metric)
+        cr.addStretch(1)
+        fq.addRow("Condition", cond_row)
+
+        self.in_qc_on_unknown = QComboBox(self.gb_quota)
+        self.in_qc_on_unknown.addItem("skip the run (safe)", "skip")
+        self.in_qc_on_unknown.addItem("run anyway", "run")
+        fq.addRow("If quota can't be read", self.in_qc_on_unknown)
+
+        if qc:
+            self.in_qc_comparator.setCurrentIndex(
+                max(0, self.in_qc_comparator.findData(qc.comparator))
+            )
+            self.in_qc_percent.setValue(int(qc.percent))
+            self.in_qc_metric.setCurrentText(qc.metric)
+            self.in_qc_on_unknown.setCurrentIndex(
+                max(0, self.in_qc_on_unknown.findData(qc.on_unknown))
+            )
+        self._qc_pref_window = qc.window if qc else "weekly"
+
+        self.lbl_qc_hint = QLabel(self.gb_quota)
+        self.lbl_qc_hint.setWordWrap(True)
+        self.lbl_qc_hint.setObjectName("hint")
+        fq.addRow("", self.lbl_qc_hint)
+        content_lay.addWidget(self.gb_quota)
 
         # --- 알림 설정 (Telegram Notification) ---
         gb_notify = QGroupBox("Telegram Notification", self)
@@ -368,10 +452,17 @@ class TaskDialog(QDialog):
         self.in_cwd.textChanged.connect(self._refresh_preview)
         self.in_timeout.valueChanged.connect(self._refresh_preview)
         self.in_preset.currentIndexChanged.connect(self._on_preset_changed)
-        self.in_mode.currentTextChanged.connect(self._on_mode_changed)
+        self.in_mode.currentIndexChanged.connect(self._on_mode_changed)
         self.in_time.timeChanged.connect(self._refresh_preview)
         self.in_tz.currentTextChanged.connect(self._refresh_preview)
         self.in_interval.valueChanged.connect(self._refresh_preview)
+
+        self.in_agent.currentTextChanged.connect(self._refresh_quota_condition_ui)
+        self.in_qc_enabled.toggled.connect(self._refresh_quota_condition_ui)
+        self.in_qc_window.currentIndexChanged.connect(self._refresh_quota_condition_ui)
+        self.in_mrr_enabled.toggled.connect(
+            lambda c: self.in_mrr_hours.setEnabled(c or self.in_mode.currentData() == "quota")
+        )
 
         self.in_notify_artifact.toggled.connect(self._toggle_artifact_fields)
         self._toggle_artifact_fields(self.in_notify_artifact.isChecked())
@@ -443,13 +534,98 @@ class TaskDialog(QDialog):
         self.in_model.setCurrentText(keep)
         self.in_model.blockSignals(False)
 
-    def _on_mode_changed(self, _mode: str = "") -> None:
-        weekly = self.in_mode.currentText() == "weekly"
-        interval = self.in_mode.currentText() == "interval"
+    def _on_mode_changed(self, _idx: int = -1) -> None:
+        mode = self.in_mode.currentData()
+        weekly = mode == "weekly"
+        interval = mode == "interval"
+        quota = mode == "quota"
         for cb in self.day_checks.values():
             cb.setEnabled(weekly)
         self.in_interval.setEnabled(interval)
-        self.in_time.setEnabled(not interval)
+        self.in_time.setEnabled(not interval and not quota)
+        self.in_tz.setEnabled(not quota)
+        self._refresh_quota_condition_ui()
+        self._refresh_preview()
+
+    def _refresh_quota_condition_ui(self, *_args) -> None:
+        """Enable / populate the quota-condition widgets for the current agent+mode.
+
+        In ``quota`` mode both the quota condition and the min re-run interval are
+        mandatory, so they are forced on and locked.  For a non-quota-capable
+        agent the whole condition is unavailable.
+        """
+        agent = self.in_agent.currentText()
+        capable = agent in QUOTA_CAPABLE_AGENTS
+        quota_mode = self.in_mode.currentData() == "quota"
+
+        if quota_mode:
+            for w, val in ((self.in_qc_enabled, True), (self.in_mrr_enabled, True)):
+                w.blockSignals(True)
+                w.setChecked(val)
+                w.blockSignals(False)
+            self.in_qc_enabled.setEnabled(False)
+            self.in_mrr_enabled.setEnabled(False)
+        else:
+            self.in_mrr_enabled.setEnabled(True)
+            self.in_qc_enabled.setEnabled(capable)
+            if not capable and self.in_qc_enabled.isChecked():
+                self.in_qc_enabled.blockSignals(True)
+                self.in_qc_enabled.setChecked(False)
+                self.in_qc_enabled.blockSignals(False)
+
+        self.in_mrr_hours.setEnabled(self.in_mrr_enabled.isChecked() or quota_mode)
+
+        on = self.in_qc_enabled.isChecked() and capable
+        self.lbl_qc_engine.setText(f"{agent}:")
+        for w in (
+            self.in_qc_window,
+            self.in_qc_comparator,
+            self.in_qc_percent,
+            self.in_qc_metric,
+            self.in_qc_on_unknown,
+        ):
+            w.setEnabled(on)
+
+        # Window choices depend on what this agent actually reports.
+        wins = tuple(available_windows(agent)) if capable else ()
+        want = self.in_qc_window.currentData() or self._qc_pref_window
+        labels = {
+            "weekly": "weekly window",
+            "5h": "5-hour window",
+            "any": "either window",
+            "all": "both windows",
+        }
+        opts = list(wins)
+        if len(wins) >= 2:
+            opts += ["any", "all"]
+        self.in_qc_window.blockSignals(True)
+        self.in_qc_window.clear()
+        for w in opts:
+            self.in_qc_window.addItem(labels.get(w, w), w)
+        idx = self.in_qc_window.findData(want)
+        self.in_qc_window.setCurrentIndex(idx if idx >= 0 else 0)
+        self.in_qc_window.blockSignals(False)
+        if self.in_qc_window.currentData():
+            self._qc_pref_window = self.in_qc_window.currentData()
+
+        if not capable:
+            self.lbl_qc_hint.setText(
+                f"{agent} does not report quota — condition unavailable "
+                "(engines with quota: " + ", ".join(sorted(QUOTA_CAPABLE_AGENTS)) + ")."
+            )
+        elif quota_mode:
+            self.lbl_qc_hint.setText(
+                "No time trigger. The quota poll checks this every "
+                f"~{self.settings.quota_poll.interval_minutes} min and runs the task "
+                "when the condition holds (min re-run interval still applies)."
+            )
+        elif on:
+            self.lbl_qc_hint.setText(
+                "Runs at the scheduled time only when this condition is also met; "
+                "otherwise it is skipped (not a failure)."
+            )
+        else:
+            self.lbl_qc_hint.setText("")
         self._refresh_preview()
 
     def done(self, r: int) -> None:  # noqa: D401 — stop the model worker cleanly
@@ -502,6 +678,14 @@ class TaskDialog(QDialog):
         self.in_notify_artifact.setChecked(False)
         self.in_artifact_dir.clear()
         self.in_artifact_ext.setText(".md")
+        self.in_mrr_enabled.setChecked(True)
+        self.in_mrr_hours.setValue(6.0)
+        self.in_qc_enabled.setChecked(False)
+        self.in_qc_comparator.setCurrentIndex(0)
+        self.in_qc_percent.setValue(90)
+        self.in_qc_metric.setCurrentText("used")
+        self.in_qc_on_unknown.setCurrentIndex(0)
+        self._refresh_quota_condition_ui()
         self._refresh_preview()
 
     def _refresh_preview(self) -> None:
@@ -569,6 +753,50 @@ class TaskDialog(QDialog):
             QMessageBox.warning(self, "Missing name", "Task name is required.")
             return
 
+        # --- Run limits: validate widgets BEFORE any disk write (no orphan .md) ---
+        mode = self.in_mode.currentData()
+        agent = self.in_agent.currentText()
+        qc_on = self.in_qc_enabled.isChecked()
+
+        if qc_on and agent not in QUOTA_CAPABLE_AGENTS:
+            QMessageBox.warning(
+                self,
+                "Quota not available",
+                f"{agent!r} does not report quota usage. Turn the quota condition "
+                "off, or choose one of: " + ", ".join(sorted(QUOTA_CAPABLE_AGENTS)) + ".",
+            )
+            return
+        if mode == "quota" and not qc_on:
+            QMessageBox.warning(
+                self,
+                "Quota condition required",
+                "A quota-triggered task has no time schedule, so it needs a quota "
+                "condition to decide when to run. Enable it, or pick a time-based mode.",
+            )
+            return
+
+        mrr_enabled = self.in_mrr_enabled.isChecked() or mode == "quota"
+        if mode == "quota" and not mrr_enabled:
+            QMessageBox.warning(
+                self,
+                "Min re-run interval required",
+                "Quota-triggered tasks must keep a minimum re-run interval so the "
+                "poller cannot fire them back-to-back. Enable it to continue.",
+            )
+            return
+        min_rerun = MinRerunInterval(
+            enabled=mrr_enabled, hours=float(self.in_mrr_hours.value())
+        )
+        quota_condition = None
+        if qc_on and agent in QUOTA_CAPABLE_AGENTS:
+            quota_condition = QuotaCondition(
+                window=self.in_qc_window.currentData() or "weekly",
+                comparator=self.in_qc_comparator.currentData() or ">=",
+                percent=float(self.in_qc_percent.value()),
+                metric=self.in_qc_metric.currentText(),
+                on_unknown=self.in_qc_on_unknown.currentData() or "skip",
+            )
+
         if self._prompt_source() == "inline":
             body = self.in_prompt_editor.toPlainText().strip()
             if not body:
@@ -597,6 +825,7 @@ class TaskDialog(QDialog):
                     self, "Prompt file missing", f"File does not exist:\n{prompt_file}"
                 )
                 return
+
         # Persist
         from ..cli import load_tasks
 
@@ -610,7 +839,7 @@ class TaskDialog(QDialog):
             id=self.task_id,
             name=name,
             enabled=True,
-            agent=self.in_agent.currentText(),
+            agent=agent,
             model=self.in_model.currentText().strip() or None,
             prompt_file=prompt_file,
             working_dir=self.in_cwd.text().strip() or None,
@@ -621,6 +850,8 @@ class TaskDialog(QDialog):
             notify_artifact=self.in_notify_artifact.isChecked(),
             artifact_dir=self.in_artifact_dir.text().strip() or None,
             artifact_extensions=ext_list,
+            min_rerun_interval=min_rerun,
+            quota_condition=quota_condition,
         )
         # Replace if same id
         tasks = [t for t in tasks if t.id != new_task.id]
@@ -632,7 +863,7 @@ class TaskDialog(QDialog):
     def _build_schedule(self) -> Schedule:
         days = [c for c, cb in self.day_checks.items() if cb.isChecked()]
         return Schedule(
-            mode=self.in_mode.currentText(),
+            mode=self.in_mode.currentData(),
             days=days,
             time=self.in_time.time().toString("HH:mm"),
             timezone=self.in_tz.currentText().strip() or "Asia/Seoul",

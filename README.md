@@ -244,14 +244,42 @@ One entry per task. Key fields:
 | `model` | Optional; falls back to the agent's `default_model` |
 | `prompt_file` | The md file the agent will read |
 | `working_dir` | Optional; the agent process cwd |
-| `schedule.mode` | `once` \| `daily` \| `weekly` \| `interval` |
+| `schedule.mode` | `once` \| `daily` \| `weekly` \| `interval` \| `quota` |
 | `schedule.days` | For weekly: `mon`, `tue`, ... `sun` |
 | `schedule.time` | `HH:MM` (24h) |
 | `schedule.timezone` | IANA tz name, e.g. `Asia/Seoul` |
 | `schedule.interval_minutes` | For `interval` mode only |
+| `min_rerun_interval.enabled` / `.hours` | Floor on how often the task actually runs. Default `true` / `6`. Skips never advance the clock; "Run now" bypasses it. |
+| `quota_condition` | Optional gate: run only when this task's agent quota meets a threshold (see below) |
 | `extra_args` | Free-form list passed to the agent CLI |
 | `timeout_minutes` | `0` = no timeout |
 | `on_failure.notify` | Send a Telegram message on failure (bot must be configured) |
+
+### Quota-conditional execution
+
+A task can be tied to its own agent's quota usage. Two shapes:
+
+- **Gate (time schedule + condition)** — keep a normal `daily`/`weekly`/… schedule
+  and add `quota_condition`. At the scheduled time the task runs only if the
+  condition also holds; otherwise it is skipped (not a failure, no Telegram).
+- **Trigger (`schedule.mode: quota`)** — no time trigger at all. The quota-poll
+  timer (`mdrunner quota-tick`, default every 10 min) refreshes the snapshot and
+  runs the task whenever the condition is met. `mode: quota` requires
+  `min_rerun_interval.enabled: true` so the poller can't fire it back-to-back.
+
+```yaml
+quota_condition:
+  window: weekly      # weekly | 5h | any (either) | all (both) — only windows the agent reports
+  comparator: ">="    # >= | > | <= | <
+  percent: 90
+  metric: used        # used | remaining
+  on_unknown: skip    # skip | run  — when the quota can't be read
+```
+
+The condition's agent is always the task's `agent`, and it must be a
+quota-capable one (`claude`, `codex`, `agy`, `grok`; `grok` reports the weekly
+window only). Enable the trigger timer with `mdrunner quota-schedule install`;
+`mdrunner validate` flags a `mode: quota` task whose timer is missing.
 
 ### Agent quota (`mdrunner quota`)
 
@@ -287,7 +315,7 @@ snapshot and re-probes on demand. Configure polling in `settings.yaml`:
 ```yaml
 quota_poll:
   enabled: false
-  interval_minutes: 180
+  interval_minutes: 10
   agents: [claude, codex, agy, grok]
 ```
 

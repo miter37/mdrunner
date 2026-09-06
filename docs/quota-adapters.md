@@ -49,10 +49,30 @@ mdrunner quota-schedule uninstall
 ```yaml
 quota_poll:
   enabled: false
-  interval_minutes: 180
+  interval_minutes: 10
   agents: [claude, codex, agy, grok]
 ```
 
 The timer runs `mdrunner quota --write`, which refreshes
 `~/.local/state/mdrunner/quota.json`. The GUI's **Agent Quota** dock loads
 that snapshot on start and re-probes on **Refresh**.
+
+## Quota-conditional task execution
+
+`quota_gate.check_task_gate()` decides whether a task may run right now, from
+two gates checked cheap-first:
+
+1. `min_rerun_interval` — enough time since the task last *actually* ran?
+   Skips (min-interval, quota, lock) never advance `last_run_at`, so repeated
+   skips can't push the deadline forward and starve the task.
+2. `quota_condition` — the task's own agent's usage vs. a threshold, read from
+   the latest snapshot (one live `probe_quota()` for that single agent if its
+   entry is missing or older than 15 min). `on_unknown` picks `skip`/`run`
+   when there is still no reading.
+
+`mdrunner run <id> --mode scheduled` applies both gates (bypass with
+`--force`); `--mode manual` / GUI **Run now** bypass them. For
+`schedule.mode: quota` tasks there is no OS timer for the task itself — the
+`mdrunner quota-tick` poll timer (installed by `mdrunner quota-schedule
+install`) refreshes the snapshot and fires them. See the README's
+"Quota-conditional execution" section for the `quota_condition` fields.

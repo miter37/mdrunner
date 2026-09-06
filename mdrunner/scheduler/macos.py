@@ -194,7 +194,7 @@ class MacScheduler:
             _unload(plist, _QUOTA_LABEL)
         body = {
             "Label": _QUOTA_LABEL,
-            "ProgramArguments": [str(mdrunner_executable), "quota", "--write"],
+            "ProgramArguments": [str(mdrunner_executable), "quota-tick"],
             "RunAtLoad": True,
             "StartInterval": max(60, int(interval_minutes) * 60),
             "EnvironmentVariables": {"PATH": _harvest_path()},

@@ -79,6 +79,16 @@ def state_dir() -> Path:
     return p
 
 
+def task_state_file() -> Path:
+    """Per-task runtime state (last real run time), for the re-run interval."""
+    return state_dir() / "task-state.json"
+
+
+def quota_trigger_file() -> Path:
+    """Per-task quota-trigger bookkeeping for `mdrunner quota-tick`."""
+    return state_dir() / "quota-triggers.json"
+
+
 def quota_snapshot_file() -> Path:
     """Latest agent-quota snapshot written by `mdrunner quota --write`."""
     return state_dir() / "quota.json"

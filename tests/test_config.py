@@ -192,3 +192,116 @@ def test_artifact_config_roundtrip(tmp_path: Path) -> None:
     s_def = settings_from_dict(settings_default_raw)
     assert s_def.defaults.artifact_markers == ["Saved:", "저장 완료:"]
     assert s_def.defaults.artifact_time_window_seconds == 30
+
+
+# --- quota-conditional execution -------------------------------------------
+
+
+def _qc_task_raw(**over) -> dict:
+    raw = {
+        "id": "qc",
+        "name": "Quota task",
+        "agent": "codex",
+        "prompt_file": "/tmp/x.md",
+        "schedule": {"mode": "daily", "time": "02:00"},
+        "min_rerun_interval": {"enabled": True, "hours": 6},
+        "quota_condition": {
+            "window": "weekly",
+            "comparator": ">=",
+            "percent": 90,
+            "metric": "used",
+            "on_unknown": "skip",
+        },
+    }
+    raw.update(over)
+    return raw
+
+
+def test_min_rerun_interval_defaults_on() -> None:
+    t = task_from_dict({"id": "d", "name": "D"})
+    assert t.min_rerun_interval.enabled is True
+    assert t.min_rerun_interval.hours == 6.0
+    assert t.quota_condition is None
+
+
+def test_quota_condition_roundtrip() -> None:
+    t = task_from_dict(_qc_task_raw())
+    assert t.quota_condition is not None
+    assert t.quota_condition.window == "weekly"
+    assert t.quota_condition.describe("codex") == "codex weekly used >= 90%"
+    assert task_from_dict(task_to_dict(t)) == t
+
+
+def test_quota_condition_rejects_non_capable_agent() -> None:
+    with pytest.raises(ConfigError):
+        task_from_dict(_qc_task_raw(agent="opencode"))
+
+
+def test_quota_condition_rejects_bad_window() -> None:
+    raw = _qc_task_raw()
+    raw["quota_condition"]["window"] = "monthly"
+    with pytest.raises(ConfigError):
+        task_from_dict(raw)
+
+
+def test_quota_condition_rejects_bad_comparator() -> None:
+    raw = _qc_task_raw()
+    raw["quota_condition"]["comparator"] = "=="
+    with pytest.raises(ConfigError):
+        task_from_dict(raw)
+
+
+def test_quota_mode_needs_condition() -> None:
+    raw = _qc_task_raw(schedule={"mode": "quota"})
+    del raw["quota_condition"]
+    with pytest.raises(ConfigError):
+        task_from_dict(raw)
+
+
+def test_quota_mode_needs_min_rerun_enabled() -> None:
+    raw = _qc_task_raw(schedule={"mode": "quota"})
+    raw["min_rerun_interval"] = {"enabled": False}
+    with pytest.raises(ConfigError):
+        task_from_dict(raw)
+
+
+def test_quota_mode_ok_when_both_present() -> None:
+    t = task_from_dict(_qc_task_raw(schedule={"mode": "quota"}))
+    assert t.schedule.mode == "quota"
+    assert t.quota_condition is not None
+    assert t.min_rerun_interval.enabled is True
+
+
+def test_quota_condition_rejects_bad_metric() -> None:
+    raw = _qc_task_raw()
+    raw["quota_condition"]["metric"] = "leftover"
+    with pytest.raises(ConfigError):
+        task_from_dict(raw)
+
+
+def test_quota_condition_rejects_bad_on_unknown() -> None:
+    raw = _qc_task_raw()
+    raw["quota_condition"]["on_unknown"] = "explode"
+    with pytest.raises(ConfigError):
+        task_from_dict(raw)
+
+
+def test_quota_condition_rejects_percent_out_of_range() -> None:
+    raw = _qc_task_raw()
+    raw["quota_condition"]["percent"] = 150
+    with pytest.raises(ConfigError):
+        task_from_dict(raw)
+
+
+def test_quota_condition_rejects_non_numeric_percent() -> None:
+    raw = _qc_task_raw()
+    raw["quota_condition"]["percent"] = "lots"
+    with pytest.raises(ConfigError):
+        task_from_dict(raw)
+
+
+def test_min_rerun_rejects_non_positive_hours() -> None:
+    with pytest.raises(ConfigError):
+        task_from_dict({"id": "d", "name": "D", "min_rerun_interval": {"hours": 0}})
+    with pytest.raises(ConfigError):
+        task_from_dict({"id": "d", "name": "D", "min_rerun_interval": {"hours": -3}})

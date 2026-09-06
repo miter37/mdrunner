@@ -29,6 +29,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "validate",
         "health",
         "quota",
+        "quota-tick",
         "quota-schedule",
         "quota-sink",
         "quota-sink-setup",

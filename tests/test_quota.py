@@ -211,7 +211,7 @@ def test_quota_poll_config_roundtrip():
     # default when absent
     s2 = settings_from_dict({"agents": {}})
     assert s2.quota_poll.enabled is False
-    assert s2.quota_poll.interval_minutes == 180
+    assert s2.quota_poll.interval_minutes == 10
     # survives to_dict -> from_dict
     assert settings_from_dict(settings_to_dict(s)).quota_poll.interval_minutes == 45
 

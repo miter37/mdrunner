@@ -93,6 +93,8 @@ class RunResult:
     log_file: str | None = None
     saved_file: str | None = None  # parsed from "저장 완료:" line if present
     error: str | None = None
+    skipped: bool = False          # a gate (min-interval / quota) blocked the run
+    skip_reason: str | None = None
 
     @property
     def duration_seconds(self) -> float:
@@ -230,6 +232,52 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _task_state() -> dict:
+    import json
+
+    from .utils.paths import task_state_file
+
+    try:
+        return json.loads(task_state_file().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def last_real_run_at(task_id: str) -> float | None:
+    v = _task_state().get(task_id, {}).get("last_run_at")
+    return float(v) if v else None
+
+
+def _record_real_run(task_id: str) -> None:
+    import json
+
+    from .utils.paths import task_state_file
+
+    st = _task_state()
+    st.setdefault(task_id, {})["last_run_at"] = time.time()
+    p = task_state_file()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(st, indent=2), encoding="utf-8")
+
+
+def _skipped_result(task_id: str, reason: str, log_file: str | None = None) -> RunResult:
+    now = time.time()
+    if log_file:
+        try:
+            with Path(log_file).open("a", encoding="utf-8") as fh:
+                fh.write(
+                    f"\n===== mdrunner skip {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"task={task_id} — {reason} =====\n"
+                )
+        except OSError:
+            pass
+    return RunResult(
+        task_id=task_id, started_at=now, finished_at=now, exit_code=None,
+        timed_out=False, binary_path=None, argv=[], log_file=log_file,
+        skipped=True, skip_reason=reason,
+    )
+
+
 def run_task(
     task_id: str,
     *,
@@ -238,10 +286,13 @@ def run_task(
     tasks_file: Path | None = None,
     settings_file: Path | None = None,
     timeout_override: int | None = None,
+    force_run: bool = False,
 ) -> RunResult:
     """Execute one task by id. Returns a RunResult.
 
     mode: "manual" | "scheduled" — selects which bypass flag set from settings.
+    A "scheduled" run passes through the min-rerun-interval and quota-condition
+    gates unless ``force_run`` is set; "manual" always bypasses them.
     """
     if mode not in ("manual", "scheduled"):
         raise ValueError(f"mode must be 'manual' or 'scheduled', got {mode!r}")
@@ -282,7 +333,23 @@ def run_task(
             error=f"no settings for agent {task.agent!r} (add it to settings.yaml)",
         )
 
+    # Gates (min re-run interval + quota condition). Scheduled runs only.
+    if mode == "scheduled" and not force_run and (
+        task.min_rerun_interval.enabled or task.quota_condition is not None
+    ):
+        from .quota import load_snapshot
+        from .quota_gate import check_task_gate
+        from .utils.paths import task_log_file
+
+        decision = check_task_gate(
+            task, last_run_at=last_real_run_at(task_id), snapshot=load_snapshot()
+        )
+        if not decision.allowed:
+            return _skipped_result(task_id, decision.reason, str(task_log_file(task_id)))
+
     result = _execute(task, agent_cfg, settings.defaults, mode, timeout_override)
+    if not result.skipped:
+        _record_real_run(task_id)
     if result.ok and task.notify_artifact:
         delivery = _send_result_artifacts_via_telegram(task, settings, result)
         if delivery.ok:
