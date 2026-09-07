@@ -180,7 +180,7 @@ def detect_saved_file(text: str, markers: list[str]) -> str | None:
                 # extract first plausible absolute path
                 for token in tail.split():
                     if token.startswith("/") or (
-                        len(token) > 2 and token[1] == ":" and token[2] == "\\"
+                        len(token) > 2 and token[1] == ":" and token[2] in ("/", "\\")
                     ):
                         last = token
                         break
@@ -616,6 +616,9 @@ def _execute(
         cwd = argv_result.cwd or working_dir
         stdin_text = argv_result.stdin_text
 
+        if binary_path and argv:
+            argv = [binary_path, *argv[1:]]
+
         timeout_minutes = timeout_override if timeout_override is not None else task.timeout_minutes
         if timeout_minutes <= 0:
             timeout_seconds = None  # no limit
@@ -681,6 +684,8 @@ def _execute(
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
                         text=True,
+                        encoding="utf-8",
+                        errors="replace",
                         bufsize=1,
                         env=os.environ.copy(),
                         start_new_session=(sys.platform != "win32"),

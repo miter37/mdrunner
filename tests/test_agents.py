@@ -37,15 +37,16 @@ def test_opencode_no_model_no_bypass(tmp_path: Path) -> None:
 def test_codex_basic(tmp_path: Path) -> None:
     md = tmp_path / "task.md"
     md.write_text("codex prompt", encoding="utf-8")
+    wd = Path("/tmp")
     adapter = get_adapter("codex")
-    res = adapter.build_argv(md, model="gpt-5.4", working_dir=Path("/tmp"),
+    res = adapter.build_argv(md, model="gpt-5.4", working_dir=wd,
                              extra_args=("--sandbox", "workspace-write"),
                              bypass_flags=("--yolo",))
     assert res.argv[0] == "codex"
     assert res.argv[1] == "exec"
     assert res.argv[-1] == "-"
     assert "--cd" in res.argv
-    assert "/tmp" in res.argv
+    assert str(wd) in res.argv
     assert "--yolo" in res.argv
     assert "--sandbox" in res.argv
     assert res.stdin_text == "codex prompt"
@@ -90,11 +91,12 @@ def test_openclaw_basic(tmp_path: Path) -> None:
 def test_claude_basic(tmp_path: Path) -> None:
     md = tmp_path / "task.md"
     md.write_text("claude prompt", encoding="utf-8")
+    wd = Path("/tmp")
     adapter = get_adapter("claude")
     res = adapter.build_argv(
         md,
         model="glm-5.2",
-        working_dir=Path("/tmp"),
+        working_dir=wd,
         extra_args=("--verbose",),
         bypass_flags=("--dangerously-skip-permissions",),
     )
@@ -105,7 +107,7 @@ def test_claude_basic(tmp_path: Path) -> None:
     assert "--model" in res.argv
     assert res.argv[res.argv.index("--model") + 1] == "glm-5.2"
     assert "--add-dir" in res.argv
-    assert "/tmp" in res.argv
+    assert str(wd) in res.argv
     assert "--verbose" in res.argv
 
 
@@ -123,11 +125,12 @@ def test_claude_default_bypass(tmp_path: Path) -> None:
 def test_agy_basic(tmp_path: Path) -> None:
     md = tmp_path / "task.md"
     md.write_text("agy prompt", encoding="utf-8")
+    wd = Path("/tmp")
     adapter = get_adapter("agy")
     res = adapter.build_argv(
         md,
         model="Gemini 3.5 Flash (Medium)",
-        working_dir=Path("/tmp"),
+        working_dir=wd,
         extra_args=(),
         bypass_flags=("--dangerously-skip-permissions",),
     )
@@ -138,7 +141,7 @@ def test_agy_basic(tmp_path: Path) -> None:
     assert "--model" in res.argv
     assert res.argv[res.argv.index("--model") + 1] == "Gemini 3.5 Flash (Medium)"
     assert "--add-dir" in res.argv
-    assert "/tmp" in res.argv
+    assert str(wd) in res.argv
 
 
 def test_agy_default_bypass(tmp_path: Path) -> None:
@@ -154,11 +157,12 @@ def test_agy_default_bypass(tmp_path: Path) -> None:
 def test_hermes_basic(tmp_path: Path) -> None:
     md = tmp_path / "task.md"
     md.write_text("hermes prompt", encoding="utf-8")
+    wd = Path("/tmp")
     adapter = get_adapter("hermes")
     res = adapter.build_argv(
         md,
         model=None,  # user wants claude-code-style default model selection
-        working_dir=Path("/tmp"),
+        working_dir=wd,
         extra_args=(),
         bypass_flags=("--yolo",),
     )
@@ -169,7 +173,7 @@ def test_hermes_basic(tmp_path: Path) -> None:
     assert "hermes prompt" in res.argv
     assert "--yolo" in res.argv
     assert "--add-dir" in res.argv
-    assert "/tmp" in res.argv
+    assert str(wd) in res.argv
     # No --model when model is None
     assert "--model" not in res.argv
 
@@ -188,11 +192,12 @@ def test_hermes_default_bypass(tmp_path: Path) -> None:
 def test_grok_basic(tmp_path: Path) -> None:
     md = tmp_path / "task.md"
     md.write_text("ignored — file path is the prompt", encoding="utf-8")
+    wd = Path("/tmp")
     adapter = get_adapter("grok")
     res = adapter.build_argv(
         md,
         model="grok-4.6",
-        working_dir=Path("/tmp"),
+        working_dir=wd,
         extra_args=("--reasoning-effort", "high"),
         bypass_flags=("--permission-mode", "bypassPermissions"),
     )
@@ -203,7 +208,7 @@ def test_grok_basic(tmp_path: Path) -> None:
     assert "--permission-mode" in res.argv
     assert "bypassPermissions" in res.argv
     assert res.argv[res.argv.index("--model") + 1] == "grok-4.6"
-    assert "--cwd" in res.argv and "/tmp" in res.argv
+    assert "--cwd" in res.argv and str(wd) in res.argv
     assert "--reasoning-effort" in res.argv
 
 

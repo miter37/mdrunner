@@ -33,11 +33,15 @@ def probe_health(binary: str, health_cmd: Sequence[str], timeout: float = 5.0) -
         )
 
     cmd = list(health_cmd) if health_cmd else [binary, "--version"]
+    if path and cmd and cmd[0] == binary:
+        cmd[0] = path
     try:
         proc = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:

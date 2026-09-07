@@ -27,23 +27,32 @@ if exist "%MD_RUNNER_DIR%\dist\mdrunner.exe" (
     exit /b %errorlevel%
 )
 
-REM 2) Central venv (overridable)
-if not defined MDRUNNER_PYTHON (
-    if exist "C:\Users\default\AppData\Local\Programs\Python\Python314\venv\Scripts\python.exe" (
-        set "MDRUNNER_PYTHON=C:\Users\default\AppData\Local\Programs\Python\Python314\venv\Scripts\python.exe"
-    )
+REM 2) Local .venv
+if exist "%MD_RUNNER_DIR%\.venv\Scripts\python.exe" (
+    "%MD_RUNNER_DIR%\.venv\Scripts\python.exe" -m mdrunner %*
+    exit /b %errorlevel%
 )
+
+REM 3) Custom MDRUNNER_PYTHON
 if defined MDRUNNER_PYTHON if exist "%MDRUNNER_PYTHON%" (
     set "PYTHONPATH=%MD_RUNNER_DIR%"
     "%MDRUNNER_PYTHON%" -m mdrunner %*
     exit /b %errorlevel%
 )
 
-REM 3) PATH python fallback
+REM 4) PATH python fallback
 where python >nul 2>&1
 if %errorlevel% equ 0 (
     set "PYTHONPATH=%MD_RUNNER_DIR%"
     python -m mdrunner %*
+    exit /b %errorlevel%
+)
+
+REM 5) Python launcher (py) fallback
+where py >nul 2>&1
+if %errorlevel% equ 0 (
+    set "PYTHONPATH=%MD_RUNNER_DIR%"
+    py -m mdrunner %*
     exit /b %errorlevel%
 )
 

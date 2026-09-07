@@ -27,6 +27,27 @@ def _task_name(task_id: str) -> str:
     return f"mdrunner-{safe}"
 
 
+def _get_windows_short_date_pattern() -> str:
+    """Read Windows user locale short date format from registry (e.g. yyyy-MM-dd)."""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\International") as key:
+            pattern, _ = winreg.QueryValueEx(key, "sShortDate")
+            # Convert Windows format specifiers to strftime format
+            pattern = (
+                pattern.replace("yyyy", "%Y")
+                .replace("yy", "%y")
+                .replace("MM", "%m")
+                .replace("M", "%m")
+                .replace("dd", "%d")
+                .replace("d", "%d")
+            )
+            return pattern
+    except Exception:
+        return "%Y/%m/%d"
+
+
 def _build_trigger(task: Task) -> tuple[list[str], str]:
     """Return (schtasks /create args for the trigger, human-readable summary)."""
     s = task.schedule
@@ -37,7 +58,8 @@ def _build_trigger(task: Task) -> tuple[list[str], str]:
         )
     common = ["/SC"]
     if s.mode == "once":
-        today = _dt.date.today().strftime("%m/%d/%Y")
+        pattern = _get_windows_short_date_pattern()
+        today = _dt.date.today().strftime(pattern)
         return common + ["ONCE", "/SD", today, "/ST", s.time], f"once @ {s.time}"
     if s.mode == "interval":
         minutes = max(1, int(s.interval_minutes))
@@ -91,6 +113,10 @@ def _query_named(name: str) -> tuple[Optional[int], Optional[_dt.datetime], Opti
 _SCHTASKS_DT_FORMATS = (
     "%m/%d/%Y %I:%M:%S %p",
     "%m/%d/%Y %H:%M:%S",
+    "%Y/%m/%d %I:%M:%S %p",
+    "%Y/%m/%d %H:%M:%S",
+    "%Y-%m-%d %I:%M:%S %p",
+    "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%dT%H:%M:%S",
 )
 
