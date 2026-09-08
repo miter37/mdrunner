@@ -5,6 +5,8 @@ import shutil
 import json
 from pathlib import Path
 
+from ..agents import wrap_for_windows
+
 def fetch_agent_models(agent_id: str, binary_path: str | None = None) -> list[str]:
     """Return the best-known list of model identifiers for the given agent.
 
@@ -64,7 +66,10 @@ def fetch_agent_models(agent_id: str, binary_path: str | None = None) -> list[st
         if resolved:
             try:
                 res = subprocess.run(
-                    [resolved, "models"], capture_output=True, text=True, timeout=5
+                    wrap_for_windows([resolved, "models"]),
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
                 )
                 if res.returncode == 0:
                     found: list[str] = []
@@ -84,7 +89,7 @@ def fetch_agent_models(agent_id: str, binary_path: str | None = None) -> list[st
         if resolved:
             try:
                 res = subprocess.run(
-                    [resolved, "models"],
+                    wrap_for_windows([resolved, "models"]),
                     capture_output=True,
                     text=True,
                     timeout=5,
@@ -119,7 +124,7 @@ def fetch_agent_models(agent_id: str, binary_path: str | None = None) -> list[st
     if resolved:
         try:
             res = subprocess.run(
-                [resolved, "models"],
+                wrap_for_windows([resolved, "models"]),
                 capture_output=True,
                 text=True,
                 timeout=5,

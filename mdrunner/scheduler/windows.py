@@ -48,6 +48,20 @@ def _get_windows_short_date_pattern() -> str:
         return "%Y/%m/%d"
 
 
+def _today_for_schtasks() -> str:
+    """Render today in the registry locale format, falling back to MM/DD/YYYY.
+
+    Locale formats can carry literal text (e.g. Korean ``년/월/일``) that the
+    replace chain above does not know, producing a date schtasks rejects.
+    Detect a dirty render and use a format schtasks always accepts.
+    """
+    pattern = _get_windows_short_date_pattern()
+    rendered = _dt.date.today().strftime(pattern)
+    if re.fullmatch(r"[\d\s\-/.:,]+", rendered or ""):
+        return rendered
+    return _dt.date.today().strftime("%m/%d/%Y")
+
+
 def _build_trigger(task: Task) -> tuple[list[str], str]:
     """Return (schtasks /create args for the trigger, human-readable summary)."""
     s = task.schedule
@@ -58,8 +72,7 @@ def _build_trigger(task: Task) -> tuple[list[str], str]:
         )
     common = ["/SC"]
     if s.mode == "once":
-        pattern = _get_windows_short_date_pattern()
-        today = _dt.date.today().strftime(pattern)
+        today = _today_for_schtasks()
         return common + ["ONCE", "/SD", today, "/ST", s.time], f"once @ {s.time}"
     if s.mode == "interval":
         minutes = max(1, int(s.interval_minutes))
@@ -161,7 +174,11 @@ class WindowsScheduler:
         trigger_args, _summary = _build_trigger(task)
         name = _task_name(task.id)
         # /TR takes the full command; schtasks requires surrounding quotes if spaces.
-        tr = f'"{mdrunner_executable}" run {task.id} --mode scheduled'
+        # Quote the task id too — an id with spaces would otherwise split into
+        # separate tokens and mdrunner's argparse would misparse the run command.
+        # Wrap with cmd /min so scheduled runs don't flash a console window.
+        inner = f'"{mdrunner_executable}" run "{task.id}" --mode scheduled'
+        tr = f'cmd /c start "" /min {inner}'
         cmd = [
             "schtasks", "/create",
             "/TN", name,
@@ -202,7 +219,7 @@ class WindowsScheduler:
         # schtasks /SC MINUTE accepts 1–1439
         interval = max(1, min(int(interval_minutes), 1439))
         name = self.QUOTA_TASK_NAME
-        tr = f'"{mdrunner_executable}" quota-tick'
+        tr = f'cmd /c start "" /min "{mdrunner_executable}" quota-tick'
         cmd = [
             "schtasks", "/create",
             "/TN", name,

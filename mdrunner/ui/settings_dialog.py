@@ -136,6 +136,14 @@ class SettingsDialog(QDialog):
 
         self.in_default_model = QComboBox(gb1)
         self.in_default_model.setEditable(True)
+        # Long model names ("Gemini 3.5 Flash (Medium)" …) must stay readable:
+        # size the closed box to its contents and let the popup open wider
+        # than the dialog column.
+        self.in_default_model.setSizeAdjustPolicy(
+            self.in_default_model.SizeAdjustPolicy.AdjustToContents
+        )
+        self.in_default_model.setMinimumWidth(420)
+        self.in_default_model.view().setMinimumWidth(560)
         f1.addRow("Default model", self.in_default_model)
         self.in_health_cmd = QLineEdit(gb1)
         f1.addRow("Health check cmd", self.in_health_cmd)
@@ -490,6 +498,7 @@ class SettingsDialog(QDialog):
         f.addRow("", self.cb_tg_failure)
 
         from . import _telegram_settings
+
         cfg = _telegram_settings.load()
         self.in_tg_token.setText(cfg.get("bot_token", ""))
         self.in_tg_chat.setText(cfg.get("chat_id", ""))
@@ -515,14 +524,13 @@ class SettingsDialog(QDialog):
             if not hasattr(sched, "install_quota_poll"):
                 return
             if qp.enabled:
-                sched.install_quota_poll(
-                    qp.interval_minutes, _mdrunner_executable_for_scheduler()
-                )
+                sched.install_quota_poll(qp.interval_minutes, _mdrunner_executable_for_scheduler())
             else:
                 sched.uninstall_quota_poll()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(
-                self, "Quota timer",
+                self,
+                "Quota timer",
                 f"Saved the setting, but the OS timer step failed:\n\n{exc}",
             )
 

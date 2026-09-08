@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -50,7 +52,7 @@ from .delegates import STATUS_ROLE, SUBTITLE_ROLE, StatusPillDelegate, TwoLineDe
 from .log_view import LogView
 from .settings_dialog import SettingsDialog
 from .task_dialog import TaskDialog
-from .workers import HealthCheckWorker, QuotaFetchWorker, TaskRunWorker
+from .workers import AlertSendWorker, HealthCheckWorker, QuotaFetchWorker, TaskRunWorker
 
 COL_NAME = 0
 COL_AGENT = 1
@@ -72,9 +74,7 @@ class MainWindow(QMainWindow):
 
         app = QApplication.instance()
         self._theme_mode = theme.saved_mode()
-        self._pal = theme.PALETTES[
-            theme.apply_theme(app, self._theme_mode) if app else "light"
-        ]
+        self._pal = theme.PALETTES[theme.apply_theme(app, self._theme_mode) if app else "light"]
 
         self.settings: Settings = load_settings(settings_file())
         self.tasks: list[Task] = self._load_tasks()
@@ -214,6 +214,48 @@ class MainWindow(QMainWindow):
         row.addWidget(self.quota_refresh_btn)
         lay.addLayout(row)
 
+        # --- Quota alerts (Telegram on engine quota states) ---
+        from PySide6.QtWidgets import QFrame
+
+        sep = QFrame(body)
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setObjectName("alertSep")
+        lay.addWidget(sep)
+
+        al_title = QLabel("Usage alerts", body)
+        al_title.setObjectName("logHeader")
+        lay.addWidget(al_title)
+
+        self.alert_list = QListWidget(body)
+        self.alert_list.setObjectName("alertList")
+        self.alert_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.alert_list.setMaximumHeight(112)
+        self.alert_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.alert_list.itemDoubleClicked.connect(self._on_alert_edit)
+        lay.addWidget(self.alert_list, 0)
+
+        self.alert_hint = QLabel(body)
+        self.alert_hint.setObjectName("dim")
+        self.alert_hint.setWordWrap(True)
+        self.alert_hint.setVisible(False)
+        lay.addWidget(self.alert_hint)
+
+        al_row = QHBoxLayout()
+        self.alert_add_btn = QPushButton("Add…", body)
+        self.alert_add_btn.clicked.connect(self._on_alert_add)
+        al_row.addWidget(self.alert_add_btn)
+        self.alert_edit_btn = QPushButton("Edit", body)
+        self.alert_edit_btn.clicked.connect(self._on_alert_edit)
+        al_row.addWidget(self.alert_edit_btn)
+        self.alert_del_btn = QPushButton("Delete", body)
+        self.alert_del_btn.clicked.connect(self._on_alert_delete)
+        al_row.addWidget(self.alert_del_btn)
+        al_row.addStretch(1)
+        lay.addLayout(al_row)
+
+        self._alerts: list = self._load_alerts()
+        self._refresh_alert_list()
+
         self.quota_dock.setWidget(body)
         self.quota_dock.setMinimumWidth(280)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.quota_dock)
@@ -263,6 +305,10 @@ class MainWindow(QMainWindow):
         a_qr = QAction("Refresh q&uota", self)
         a_qr.triggered.connect(self._start_quota_refresh)
         m_view.addAction(a_qr)
+        m_view.addSeparator()
+        a_week = QAction("Schedule &week view…", self)
+        a_week.triggered.connect(self._on_schedule_week)
+        m_view.addAction(a_week)
 
         m_settings = menubar.addMenu("&Settings")
         a_settings = QAction("&Preferences…", self)
@@ -297,7 +343,14 @@ class MainWindow(QMainWindow):
         add("edit", "edit", "Edit", "Edit selected task  (Ctrl+E)", self._on_edit)
         add("delete", "delete", "Delete", "Delete selected task  (Del)", self._on_delete)
         tb.addSeparator()
-        add("run", "run", "Run now", "Run selected task now  (Ctrl+R)", self._on_run_now, primary=True)
+        add(
+            "run",
+            "run",
+            "Run now",
+            "Run selected task now  (Ctrl+R)",
+            self._on_run_now,
+            primary=True,
+        )
         add("toggle", "toggle", "Enable/disable", "Toggle selected task  (Space)", self._on_toggle)
 
         spacer = QWidget(tb)
@@ -350,7 +403,8 @@ class MainWindow(QMainWindow):
             return load_tasks(tasks_file())
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
-                self, "Couldn't read tasks.yaml",
+                self,
+                "Couldn't read tasks.yaml",
                 f"tasks.yaml has a problem and no tasks were loaded:\n\n{exc}",
             )
             return []
@@ -490,7 +544,8 @@ class MainWindow(QMainWindow):
             self.status_msg.setText("Select a task first")
             return
         ans = QMessageBox.question(
-            self, "Delete task",
+            self,
+            "Delete task",
             f"Delete '{task.name}' and remove its OS scheduler entry?",
         )
         if ans != QMessageBox.StandardButton.Yes:
@@ -513,9 +568,7 @@ class MainWindow(QMainWindow):
         save_tasks(tasks_file(), self.tasks)
         self._install_schedule_for(task)
         self.refresh_table()
-        self.status_msg.setText(
-            f"{'Enabled' if task.enabled else 'Disabled'} '{task.name}'"
-        )
+        self.status_msg.setText(f"{'Enabled' if task.enabled else 'Disabled'} '{task.name}'")
 
     def _on_run_now(self) -> None:
         task = self._selected_task()
@@ -534,7 +587,11 @@ class MainWindow(QMainWindow):
                 sched.uninstall(task)  # remove a stale time-based timer if any
             except Exception:  # noqa: BLE001
                 pass
-            if task.enabled and hasattr(sched, "install_quota_poll") and not sched.quota_poll_installed():
+            if (
+                task.enabled
+                and hasattr(sched, "install_quota_poll")
+                and not sched.quota_poll_installed()
+            ):
                 try:
                     sched.install_quota_poll(
                         self.settings.quota_poll.interval_minutes,
@@ -543,7 +600,8 @@ class MainWindow(QMainWindow):
                     self.status_msg.setText("Quota poll timer installed (10 min)")
                 except Exception as exc:  # noqa: BLE001
                     QMessageBox.warning(
-                        self, "Quota poll timer",
+                        self,
+                        "Quota poll timer",
                         f"Task saved, but the quota poll timer failed to install:\n\n{exc}\n\n"
                         f"Install it with:  mdrunner quota-schedule install",
                     )
@@ -558,7 +616,8 @@ class MainWindow(QMainWindow):
             sched.install(task, _mdrunner_executable_for_scheduler())
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(
-                self, "Couldn't schedule the task",
+                self,
+                "Couldn't schedule the task",
                 f"The task is saved, but its OS schedule failed to install:\n\n{exc}\n\n"
                 f"Install it later with:  mdrunner schedule-install {task.id}",
             )
@@ -571,7 +630,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(250, self._start_quota_refresh)
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
-        for attr in ("_health_worker", "_quota_worker", "_run_worker"):
+        for attr in ("_health_worker", "_quota_worker", "_alert_worker"):
             w = getattr(self, attr, None)
             if w is not None:
                 try:
@@ -581,10 +640,23 @@ class MainWindow(QMainWindow):
                     w.wait(1500)
                 except RuntimeError:
                     pass
+        for w in (getattr(self, "_run_workers", None) or {}).values():
+            try:
+                w.quit()
+                w.wait(1500)
+            except RuntimeError:
+                pass
         super().closeEvent(event)
 
     def _on_row_double_clicked(self, _index) -> None:
         self._on_edit()
+
+    def _on_schedule_week(self) -> None:
+        from .schedule_week_dialog import ScheduleWeekDialog
+
+        dlg = ScheduleWeekDialog(parent=self, tasks=self.tasks)
+        dlg.exec()
+        dlg.deleteLater()
 
     def _on_context_menu(self, pos) -> None:
         row = self.table.rowAt(pos.y())
@@ -649,9 +721,142 @@ class MainWindow(QMainWindow):
             self.quota_status.setText("Couldn't read quota — try again")
             return
         self._render_quota_rows(results)
-        self.quota_status.setText(
-            "Updated " + _dt.datetime.now().strftime("%H:%M:%S")
-        )
+        self.quota_status.setText("Updated " + _dt.datetime.now().strftime("%H:%M:%S"))
+        self._evaluate_alerts_from_snapshot()
+
+    # ---- quota alerts ----
+
+    def _load_alerts(self) -> list:
+        from ..alerts import load_alerts
+
+        try:
+            return load_alerts()
+        except Exception:  # noqa: BLE001 — a corrupt file must not wedge the UI
+            return []
+
+    def _refresh_alert_list(self) -> None:
+        from ..alerts import load_alert_state
+
+        p = self._pal
+        self.alert_list.clear()
+        state = load_alert_state()
+        for a in self._alerts:
+            short = a.condition.describe(a.agent).split(": ", 1)[-1]
+            armed = state.get(f"armed:{a.id}", True)
+            if not a.enabled:
+                dot, col = "○", p["idle"]
+            elif armed:
+                dot, col = "●", p["ok"]
+            else:
+                dot, col = "●", p["warn"]  # fired, waiting to re-arm
+            item = QListWidgetItem(f"{dot}  {a.name}  —  {a.agent}: {short}")
+            item.setData(Qt.ItemDataRole.UserRole, a.id)
+            item.setForeground(QColor(p["text_dim"] if not a.enabled else col))
+            tip = (
+                "disabled"
+                if not a.enabled
+                else ("armed" if armed else "fired — re-arms when the condition turns false")
+            )
+            item.setToolTip(tip)
+            self.alert_list.addItem(item)
+        self._update_alert_hint()
+
+    def _update_alert_hint(self) -> None:
+        from . import _telegram_settings
+
+        if self._alerts:
+            self.alert_hint.setVisible(False)
+            return
+        self.alert_hint.setVisible(True)
+        cfg = _telegram_settings.load()
+        if not cfg.get("bot_token") or not cfg.get("chat_id"):
+            self.alert_hint.setText(
+                "No alerts yet. Add one — and set up Telegram under Settings → Notifications."
+            )
+        else:
+            self.alert_hint.setText("No alerts yet. Add one with Add… below.")
+
+    def _save_alerts(self) -> None:
+        from ..alerts import save_alerts
+
+        save_alerts(self._alerts)
+        self._refresh_alert_list()
+
+    def _selected_alert(self):
+        row = self.alert_list.currentRow()
+        if row < 0 or row >= len(self._alerts):
+            return None
+        return self._alerts[row]
+
+    def _on_alert_add(self) -> None:
+        from .alert_dialog import AlertDialog
+
+        dlg = AlertDialog(parent=self)
+        if dlg.exec() == AlertDialog.DialogCode.Accepted and dlg.alert is not None:
+            self._alerts.append(dlg.alert)
+            self._save_alerts()
+            self.status_msg.setText(f"Alert added: '{dlg.alert.name}'")
+
+    def _on_alert_edit(self) -> None:
+        from .alert_dialog import AlertDialog
+
+        cur = self._selected_alert()
+        if cur is None:
+            return
+        dlg = AlertDialog(parent=self, alert=cur)
+        if dlg.exec() == AlertDialog.DialogCode.Accepted and dlg.alert is not None:
+            self._alerts = [dlg.alert if a.id == cur.id else a for a in self._alerts]
+            self._save_alerts()
+            self.status_msg.setText(f"Alert updated: '{dlg.alert.name}'")
+
+    def _on_alert_delete(self) -> None:
+        cur = self._selected_alert()
+        if cur is None:
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "Delete alert",
+                f"Delete quota alert '{cur.name}'?",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        self._alerts = [a for a in self._alerts if a.id != cur.id]
+        self._save_alerts()
+        self.status_msg.setText(f"Alert deleted: '{cur.name}'")
+
+    def _evaluate_alerts_from_snapshot(self) -> None:
+        """Edge-evaluate alerts against the fresh snapshot; send via worker."""
+        if not self._alerts:
+            return
+        try:
+            from ..alerts import evaluate_alerts
+            from ..quota import load_snapshot
+
+            fires, _ = evaluate_alerts(self._alerts, load_snapshot())
+        except Exception as exc:  # noqa: BLE001
+            self.quota_status.setText(f"Alert check skipped ({exc})")
+            return
+        self._refresh_alert_list()  # fired rules flip to the re-arm dot now
+        if not fires:
+            return
+        if getattr(self, "_alert_worker", None) is not None:
+            return
+        self._alert_worker = AlertSendWorker(fires)
+        self._alert_worker.sent.connect(self._on_alerts_sent)
+        self._alert_worker.start()
+
+    def _on_alerts_sent(self, results: list) -> None:
+        self._alert_worker = None
+        sent = [aid for aid, ok, _d in results if ok]
+        failed = [(aid, d) for aid, ok, d in results if not ok]
+        if sent:
+            self.status_msg.setText(f"Quota alert sent ({len(sent)})")
+        if failed:
+            self.status_msg.setText(
+                f"Quota alert send failed: {'; '.join(f'{a}: {d}' for a, d in failed)[:160]}"
+            )
 
     def _render_quota_rows(self, agent_dicts: list[dict]) -> None:
         from ..quota import fmt_reset
@@ -681,7 +886,9 @@ class MainWindow(QMainWindow):
                 if first:
                     tip = f"plan: {_plan}" if _plan else ""
                     if _stale:
-                        tip = (tip + "\n" if tip else "") + (_a.get("note") or "cached — last probe failed")
+                        tip = (tip + "\n" if tip else "") + (
+                            _a.get("note") or "cached — last probe failed"
+                        )
                     if tip:
                         c.setToolTip(tip)
                     if _stale:
@@ -692,9 +899,19 @@ class MainWindow(QMainWindow):
                 r = self.quota_table.rowCount()
                 self.quota_table.insertRow(r)
                 self.quota_table.setItem(r, 0, agent_cell(True))
-                self.quota_table.setItem(
-                    r, 1, cell(a.get("error") or "unavailable", dim=True)
-                )
+                if a.get("needs_sink"):
+                    sink_cell = cell("needs setup", dim=True)
+                    sink_cell.setToolTip(
+                        f"{agent}: usage reporting needs the statusLine hook.\n"
+                        f"Run:  mdrunner quota-sink-setup {agent} --write\n"
+                        "then use the agent once — the panel reads the export."
+                    )
+                    self.quota_table.setItem(r, 1, sink_cell)
+                else:
+                    err_cell = cell(a.get("error") or "unavailable", dim=True)
+                    if a.get("error"):
+                        err_cell.setToolTip(str(a.get("error")))
+                    self.quota_table.setItem(r, 1, err_cell)
                 self.quota_table.setItem(r, 2, cell("—", dim=True))
                 self.quota_table.setItem(r, 3, cell("—", dim=True))
                 continue
@@ -759,19 +976,29 @@ class MainWindow(QMainWindow):
 
     def _start_task_run(self, task: Task, *, mode: str) -> None:
         self.log_view.set_task(task, mode=mode)
-        if getattr(self, "_run_worker", None) is not None:
+        running = getattr(self, "_run_workers", None) or {}
+        if task.id in running:
             QMessageBox.information(
-                self, "A task is already running",
-                "Wait for the current run to finish before starting another.",
+                self,
+                "Task is already running",
+                f"'{task.name}' is already running — wait for it to finish.",
             )
             return
         self._set_row_status(task.id, ("running", "running"))
         worker = TaskRunWorker(task, settings=self.settings, mode=mode)
-        worker.line.connect(self.log_view.append_line)
+        worker.line.connect(lambda line, tid=task.id: self._route_log_line(tid, line))
         worker.finished_with_result.connect(self._on_task_finished)
         worker.start()
-        self._run_worker = worker
-        self.status_msg.setText(f"Running '{task.name}'…")
+        running[task.id] = worker
+        self._run_workers = running
+        self._active_log_task = task.id
+        n = len(running)
+        self.status_msg.setText(f"Running '{task.name}'…" if n == 1 else f"Running {n} tasks…")
+
+    def _route_log_line(self, task_id: str, line: str) -> None:
+        if task_id != getattr(self, "_active_log_task", None):
+            return
+        self.log_view.append_line(line)
 
     def _set_row_status(self, task_id: str, status: tuple[str, str]) -> None:
         for row in range(self.table.rowCount()):
@@ -782,8 +1009,12 @@ class MainWindow(QMainWindow):
                 return
 
     def _on_task_finished(self, result_payload: dict) -> None:
-        self._run_worker = None
         tid = result_payload["task_id"]
+        running = getattr(self, "_run_workers", None) or {}
+        running.pop(tid, None)
+        self._run_workers = running
+        if getattr(self, "_active_log_task", None) == tid and running:
+            self._active_log_task = next(iter(running))
         ok = result_payload["ok"]
         skipped = result_payload.get("skipped")
         if skipped:
@@ -816,7 +1047,8 @@ class MainWindow(QMainWindow):
             )
         if result_payload.get("error"):
             QMessageBox.warning(
-                self, "Task failed",
+                self,
+                "Task failed",
                 str(result_payload["error"]),
             )
 
@@ -830,8 +1062,7 @@ def _qsize(n: int):
     return QSize(n, n)
 
 
-_DAY_ABBR = {"mon": "M", "tue": "Tu", "wed": "W", "thu": "Th",
-             "fri": "F", "sat": "Sa", "sun": "Su"}
+_DAY_ABBR = {"mon": "M", "tue": "Tu", "wed": "W", "thu": "Th", "fri": "F", "sat": "Sa", "sun": "Su"}
 _WEEKDAYS = {"mon", "tue", "wed", "thu", "fri"}
 
 

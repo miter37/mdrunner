@@ -90,3 +90,17 @@ def test_send_document_json_failure_is_not_success(tmp_path):
 
     assert not ok
     assert "bot was blocked" in err
+
+
+def test_telegram_settings_saved_owner_only(monkeypatch, tmp_path):
+    import os
+    import stat as statmod
+
+    monkeypatch.setenv("RUNCHER_CONFIG_DIR", str(tmp_path))
+    from mdrunner.ui import _telegram_settings
+
+    _telegram_settings.save({"bot_token": "t", "chat_id": "c"})
+    p = _telegram_settings.path()
+    assert p.exists()
+    if os.name == "posix":
+        assert statmod.S_IMODE(p.stat().st_mode) == 0o600

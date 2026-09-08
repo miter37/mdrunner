@@ -8,6 +8,7 @@ Phase 4.1 wires the actual send.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -35,3 +36,9 @@ def save(data: dict[str, Any]) -> None:
     p = path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        # Bot token on disk: owner-only. No-op on Windows (chmod is a no-op
+        # there for ACLs) and best-effort everywhere else.
+        os.chmod(p, 0o600)
+    except OSError:
+        pass

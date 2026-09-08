@@ -41,6 +41,8 @@ class TaskRunWorker(QThread):
                 mode=self.mode,
                 settings=self.settings,
             )
+            if result is not None and getattr(result, "skipped", False) is False:
+                self._send_telegram_on_start()
         except LockBusyError as exc:
             self.signals.line.emit(f"lock busy: {exc}")
             self.signals.finished_with_result.emit(
@@ -81,6 +83,30 @@ class TaskRunWorker(QThread):
                 "skip_reason": result.skip_reason,
             }
         )
+
+    def _send_telegram_on_start(self) -> None:
+        """One-line started notice, same best-effort rules as the others."""
+        try:
+            from .. import telegram
+            from . import _telegram_settings
+
+            if not getattr(self.task, "notify_start", False):
+                return
+            cfg = _telegram_settings.load()
+            if not cfg.get("bot_token") or not cfg.get("chat_id"):
+                return
+            body = telegram.format_start(self.task.name)
+            ok, resp = telegram.send(
+                bot_token=cfg["bot_token"],
+                chat_id=cfg["chat_id"],
+                text=body,
+            )
+            if ok:
+                self.signals.line.emit("[telegram] start notification sent")
+            else:
+                self.signals.line.emit(f"[telegram] notify failed: {resp}")
+        except Exception as exc:  # noqa: BLE001
+            self.signals.line.emit(f"[telegram] error: {exc}")
 
     def _send_telegram_on_failure(self, result) -> None:
         try:
@@ -203,9 +229,20 @@ class QuotaFetchWorker(QThread):
         import sys
 
         try:
+            # Include alert agents so alert rules outside the poll set still
+            # get fresh data (the child writes the snapshot itself).
+            agents = list(self.agent_ids)
+            try:
+                from ..alerts import load_alerts
+
+                for a in load_alerts():
+                    if a.enabled and a.agent not in agents:
+                        agents.append(a.agent)
+            except Exception:  # noqa: BLE001
+                pass
             subprocess.run(
                 [sys.executable, "-m", "mdrunner", "quota", "--write",
-                 "--agents", ",".join(self.agent_ids)],
+                 "--agents", ",".join(agents)],
                 capture_output=True,
                 text=True,
                 timeout=180,
@@ -221,6 +258,28 @@ class QuotaFetchWorker(QThread):
             self.signals.results_ready.emit(list(agents.values()))
         except Exception:  # noqa: BLE001
             self.signals.results_ready.emit([])
+
+
+class _AlertSignals(QObject):
+    sent = Signal(list)  # list[(alert_id, ok, detail)]
+
+
+class AlertSendWorker(QThread):
+    """Send Telegram messages for fired quota alerts off the UI thread."""
+
+    def __init__(self, fires: list) -> None:
+        super().__init__()
+        self.fires = fires
+        self.signals = _AlertSignals()
+        self.sent = self.signals.sent
+
+    def run(self) -> None:
+        try:
+            from ..alerts import send_alert_fires
+            results = send_alert_fires(self.fires)
+            self.signals.sent.emit(list(results))
+        except Exception:  # noqa: BLE001
+            self.signals.sent.emit([])
 
 
 class _SingleHealthSignals(QObject):

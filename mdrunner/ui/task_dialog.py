@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -35,18 +34,14 @@ from .theme import mono_font, style_form
 
 from ..config import (
     QUOTA_CAPABLE_AGENTS,
-    QUOTA_CLAUSES,
     MinRerunInterval,
     OnFailure,
-    QuotaClause,
-    QuotaCondition,
     Schedule,
     Settings,
     Task,
     save_tasks,
 )
 from ..prompts import is_managed_prompt, save_inline_prompt
-from ..quota_gate import available_windows
 from ..utils.paths import prompts_dir, tasks_file
 
 
@@ -59,13 +54,6 @@ WEEKDAYS = [
     ("sat", "Sat"),
     ("sun", "Sun"),
 ]
-
-_QC_DEFAULTS = {
-    "weekly_used": 90,
-    "weekly_reset": 24,
-    "fivehour_used": 90,
-    "fivehour_reset": 3,
-}
 
 COMMON_TZ = [
     "Asia/Seoul",
@@ -248,7 +236,9 @@ class TaskDialog(QDialog):
         self._style_form(fs)
         self.in_mode = QComboBox(gb_sched)
         for m, label in (
-            ("once", "once"), ("daily", "daily"), ("weekly", "weekly"),
+            ("once", "once"),
+            ("daily", "daily"),
+            ("weekly", "weekly"),
             ("interval", "interval (every N min)"),
             ("quota", "quota (no time — checked every ~10 min)"),
         ):
@@ -338,55 +328,14 @@ class TaskDialog(QDialog):
         self.in_qc_enabled.setChecked(qc is not None)
         fq.addRow("", self.in_qc_enabled)
 
-        grid_w = QWidget(self.gb_quota)
-        grid = QGridLayout(grid_w)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(4)
-        grid.addWidget(QLabel("used", grid_w), 0, 1)
-        grid.addWidget(QLabel("resets within", grid_w), 0, 2)
-        grid.addWidget(QLabel("weekly", grid_w), 1, 0)
-        grid.addWidget(QLabel("5-hour", grid_w), 2, 0)
-        _row = {"weekly": 1, "5h": 2}
-        _col = {"used": 1, "reset": 2}
-        self.qc_cells: dict[str, tuple[QCheckBox, QSpinBox]] = {}
-        # per-`used`-clause comparison operator (≥ / ≤); reset clauses have none.
-        self.qc_ops: dict[str, QComboBox] = {}
-        for attr, window, kind, _label in QUOTA_CLAUSES:
-            cb = QCheckBox(grid_w)
-            sb = QSpinBox(grid_w)
-            op_combo: QComboBox | None = None
-            if kind == "used":
-                sb.setRange(0, 100)
-                sb.setSuffix(" %")
-                op_combo = QComboBox(grid_w)
-                op_combo.addItem("≥", "gte")
-                op_combo.addItem("≤", "lte")
-            else:
-                sb.setRange(1, 24 * 14)  # hours, up to ~2 weeks
-                sb.setSuffix(" h")
-            if qc:
-                clause: QuotaClause = getattr(qc, attr)
-                cb.setChecked(clause.enabled)
-                sb.setValue(int(clause.value))
-                if op_combo is not None:
-                    op_combo.setCurrentIndex(max(0, op_combo.findData(clause.op)))
-            else:
-                sb.setValue(_QC_DEFAULTS[attr])
-            cell = QWidget(grid_w)
-            ch = QHBoxLayout(cell)
-            ch.setContentsMargins(0, 0, 0, 0)
-            ch.setSpacing(4)
-            ch.addWidget(cb)
-            if op_combo is not None:
-                ch.addWidget(op_combo)
-                self.qc_ops[attr] = op_combo
-            ch.addWidget(sb)
-            ch.addStretch(1)
-            grid.addWidget(cell, _row[window], _col[kind])
-            self.qc_cells[attr] = (cb, sb)
-        grid.setColumnStretch(3, 1)
-        fq.addRow("Clauses", grid_w)
+        from .quota_condition_widget import QuotaConditionWidget
+
+        self.qc_grid = QuotaConditionWidget(self.gb_quota, show_hint=False)
+        self.qc_grid.set_condition(qc)
+        # keep the old attribute shape for the pre-existing wiring below
+        self.qc_cells = self.qc_grid.cells
+        self.qc_ops = self.qc_grid.ops
+        fq.addRow("Clauses", self.qc_grid)
 
         self.in_qc_on_unknown = QComboBox(self.gb_quota)
         self.in_qc_on_unknown.addItem("skip the run (safe)", "skip")
@@ -424,6 +373,11 @@ class TaskDialog(QDialog):
         if task:
             self.in_notify_final.setChecked(task.notify_final_message)
         fn.addRow("", self.in_notify_final)
+
+        self.in_notify_start = QCheckBox("작업 시작 시 한 줄 알림 전송 (On start)", gb_notify)
+        if task:
+            self.in_notify_start.setChecked(task.notify_start)
+        fn.addRow("", self.in_notify_start)
 
         self.in_artifact_dir = QLineEdit(gb_notify)
         self.in_artifact_dir.setPlaceholderText("(선택 사항) 결과물이 저장될 폴더 경로")
@@ -619,19 +573,10 @@ class TaskDialog(QDialog):
         self.in_mrr_hours.setEnabled(self.in_mrr_enabled.isChecked() or quota_mode)
 
         on = self.in_qc_enabled.isChecked() and capable
-        has_5h = ("5h" in available_windows(agent)) if capable else False
-        for attr, window, _kind, _label in QUOTA_CLAUSES:
-            cb, sb = self.qc_cells[attr]
-            row_ok = on and (window != "5h" or has_5h)
-            if window == "5h" and not has_5h and cb.isChecked():
-                cb.blockSignals(True)
-                cb.setChecked(False)
-                cb.blockSignals(False)
-            cb.setEnabled(row_ok)
-            sb.setEnabled(row_ok and cb.isChecked())
-            op_combo = self.qc_ops.get(attr)
-            if op_combo is not None:
-                op_combo.setEnabled(row_ok and cb.isChecked())
+        # Non-capable agents report no usable window at all: force the grid
+        # fully off by clearing the agent (row_ok collapses without one).
+        self.qc_grid.set_agent(agent if capable else "")
+        self.qc_grid.set_master_enabled(on)
         self.in_qc_on_unknown.setEnabled(on)
 
         if not capable:
@@ -646,6 +591,9 @@ class TaskDialog(QDialog):
                 "when the condition holds (min re-run interval still applies)."
             )
         elif on:
+            from ..quota_gate import available_windows
+
+            has_5h = "5h" in available_windows(agent)
             extra = "" if has_5h else f"  ({agent} reports the weekly window only.)"
             self.lbl_qc_hint.setText(
                 "Runs at the scheduled time only when every checked clause holds; "
@@ -704,16 +652,13 @@ class TaskDialog(QDialog):
         self.in_notify_fail.setChecked(False)
         self.in_notify_artifact.setChecked(False)
         self.in_notify_final.setChecked(False)
+        self.in_notify_start.setChecked(False)
         self.in_artifact_dir.clear()
         self.in_artifact_ext.setText(".md")
         self.in_mrr_enabled.setChecked(True)
         self.in_mrr_hours.setValue(6.0)
         self.in_qc_enabled.setChecked(False)
-        for attr, (cb, sb) in self.qc_cells.items():
-            cb.setChecked(False)
-            sb.setValue(_QC_DEFAULTS[attr])
-        for op_combo in self.qc_ops.values():
-            op_combo.setCurrentIndex(0)  # back to ≥
+        self.qc_grid.set_condition(None)
         self.in_qc_on_unknown.setCurrentIndex(0)
         self._refresh_quota_condition_ui()
         self._refresh_preview()
@@ -822,23 +767,11 @@ class TaskDialog(QDialog):
                 "poller cannot fire them back-to-back. Enable it to continue.",
             )
             return
-        min_rerun = MinRerunInterval(
-            enabled=mrr_enabled, hours=float(self.in_mrr_hours.value())
-        )
+        min_rerun = MinRerunInterval(enabled=mrr_enabled, hours=float(self.in_mrr_hours.value()))
         quota_condition = None
         if qc_on and agent in QUOTA_CAPABLE_AGENTS:
-            clauses: dict[str, QuotaClause] = {}
-            any_checked = False
-            for attr, _window, _kind, _label in QUOTA_CLAUSES:
-                cb, sb = self.qc_cells[attr]
-                enabled = cb.isChecked() and cb.isEnabled()
-                any_checked = any_checked or enabled
-                op_combo = self.qc_ops.get(attr)
-                op = op_combo.currentData() if op_combo is not None else "gte"
-                clauses[attr] = QuotaClause(
-                    enabled=enabled, value=float(sb.value()), op=op or "gte"
-                )
-            if not any_checked:
+            condition = self.qc_grid.condition()
+            if condition is None:
                 QMessageBox.warning(
                     self,
                     "No quota clause checked",
@@ -846,9 +779,8 @@ class TaskDialog(QDialog):
                     "within), or turn the quota condition off.",
                 )
                 return
-            quota_condition = QuotaCondition(
-                on_unknown=self.in_qc_on_unknown.currentData() or "skip", **clauses
-            )
+            condition.on_unknown = self.in_qc_on_unknown.currentData() or "skip"
+            quota_condition = condition
 
         if self._prompt_source() == "inline":
             body = self.in_prompt_editor.toPlainText().strip()
@@ -856,8 +788,7 @@ class TaskDialog(QDialog):
                 QMessageBox.warning(
                     self,
                     "Missing instruction",
-                    "Write the task instruction, or switch Prompt source to "
-                    "“Existing file”.",
+                    "Write the task instruction, or switch Prompt source to “Existing file”.",
                 )
                 return
             existing = self.in_prompt.text().strip() or None
@@ -902,6 +833,7 @@ class TaskDialog(QDialog):
             on_failure=OnFailure(notify=self.in_notify_fail.isChecked()),
             notify_artifact=self.in_notify_artifact.isChecked(),
             notify_final_message=self.in_notify_final.isChecked(),
+            notify_start=self.in_notify_start.isChecked(),
             artifact_dir=self.in_artifact_dir.text().strip() or None,
             artifact_extensions=ext_list,
             min_rerun_interval=min_rerun,

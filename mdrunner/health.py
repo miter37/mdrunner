@@ -10,7 +10,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from .agents import resolve_binary
+from .agents import resolve_binary, wrap_for_windows
 
 
 @dataclass
@@ -37,7 +37,7 @@ def probe_health(binary: str, health_cmd: Sequence[str], timeout: float = 5.0) -
         cmd[0] = path
     try:
         proc = subprocess.run(
-            cmd,
+            wrap_for_windows(cmd),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -120,7 +120,12 @@ def probe_health_interactive(
     if agent_id == "hermes":
         ver_cmd = [path, "version"]
     try:
-        proc = subprocess.run(ver_cmd, capture_output=True, text=True, timeout=5.0)
+        proc = subprocess.run(
+            wrap_for_windows(ver_cmd),
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
         version_output = (proc.stdout or "") + (proc.stderr or "")
         version_output = version_output.strip().splitlines()[0] if version_output.strip() else "Unknown Version"
         progress_callback(f"✓ 성공: {version_output}")
@@ -176,7 +181,7 @@ def probe_health_interactive(
             cmd = [path, prompt]
 
         proc = subprocess.run(
-            cmd,
+            wrap_for_windows(cmd),
             input=stdin_data,
             capture_output=True,
             text=True,

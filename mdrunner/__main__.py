@@ -37,6 +37,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "schedule-install",
         "schedule-uninstall",
         "schedule-status",
+        "schedule-overview",
     }:
         from .cli import main as cli_main
 

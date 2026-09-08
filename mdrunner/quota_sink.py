@@ -122,10 +122,12 @@ def run(argv) -> int:
         pass
 
     # Replay to whatever status line was configured before, so it still works.
+    # Windows has no `sh`: run the chained command through cmd.exe instead.
     if args.chain:
         try:
             cmd = base64.b64decode(args.chain).decode("utf-8")
-            r = subprocess.run(["sh", "-c", cmd], input=raw, capture_output=True, timeout=10)
+            shell_argv = ["cmd", "/c", cmd] if sys.platform == "win32" else ["sh", "-c", cmd]
+            r = subprocess.run(shell_argv, input=raw, capture_output=True, timeout=10)
             sys.stdout.buffer.write(r.stdout)
             return r.returncode
         except Exception:  # noqa: BLE001

@@ -176,6 +176,7 @@ class Task:
     on_failure: OnFailure = field(default_factory=OnFailure)
     notify_artifact: bool = False
     notify_final_message: bool = False
+    notify_start: bool = False
     artifact_dir: str | None = None
     artifact_extensions: list[str] = field(default_factory=lambda: [".md"])
     min_rerun_interval: MinRerunInterval = field(default_factory=MinRerunInterval)
@@ -365,6 +366,7 @@ def task_from_dict(data: dict[str, Any]) -> Task:
         on_failure=on_failure,
         notify_artifact=bool(data.get("notify_artifact", False)),
         notify_final_message=bool(data.get("notify_final_message", False)),
+        notify_start=bool(data.get("notify_start", False)),
         artifact_dir=(str(data["artifact_dir"]) if data.get("artifact_dir") else None),
         artifact_extensions=[str(x) for x in data.get("artifact_extensions", [".md"])],
         min_rerun_interval=min_rerun,
@@ -393,6 +395,7 @@ def task_to_dict(task: Task) -> dict[str, Any]:
         "on_failure": {"notify": task.on_failure.notify},
         "notify_artifact": task.notify_artifact,
         "notify_final_message": task.notify_final_message,
+        "notify_start": task.notify_start,
         "artifact_dir": task.artifact_dir,
         "artifact_extensions": task.artifact_extensions,
         "min_rerun_interval": {

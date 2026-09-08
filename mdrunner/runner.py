@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
-from .agents import get_adapter, resolve_binary
+from .agents import get_adapter, resolve_binary, wrap_for_windows
 from .config import (
     Defaults,
     Settings,
@@ -40,10 +40,99 @@ from .config import (
 from .health import probe_health
 from .utils.paths import lock_file, task_log_file
 
+# On Windows, TerminateProcess (SIGKILL) does not guarantee child processes
+# are reaped immediately; give the process tree a moment to actually die.
+TIMEOUT_GRACE_SECONDS = 3.0
+
+
+def _wait_for_exit(proc: subprocess.Popen, timeout: float) -> None:
+    """Wait up to ``timeout`` seconds for ``proc`` to exit, polling gently."""
+    deadline = time.time() + timeout
+    while proc.poll() is None and time.time() < deadline:
+        time.sleep(0.25)
+
 
 # ---------------------------------------------------------------------------
 # Lock
 # ---------------------------------------------------------------------------
+
+
+# Locks older than this are eligible for stale-lock cleanup, but only when
+# the recorded PID no longer exists (or the file is unparseable legacy data).
+# A live PID always counts as busy, no matter how old the lock is.
+STALE_LOCK_SECONDS = 30 * 60
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if a process with ``pid`` still exists (best-effort, no deps)."""
+    if pid == os.getpid():
+        return True
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+            if not handle:
+                return False
+            kernel32.CloseHandle(handle)
+            return True
+        except Exception:  # noqa: BLE001 — conservative: assume alive
+            return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True  # exists but owned by someone else
+
+
+def _remove_if_stale(lf: Path) -> bool:
+    """Unlink ``lf`` when it is a stale lock. Returns True if removed."""
+    now = time.time()
+    try:
+        raw = lf.read_text(encoding="utf-8", errors="replace").split()
+    except OSError:
+        return False
+    pid: int | None = None
+    stamp: float | None = None
+    if raw:
+        try:
+            pid = int(raw[0])
+        except ValueError:
+            pid = None
+    if len(raw) >= 2:
+        try:
+            stamp = float(raw[1])
+        except ValueError:
+            stamp = None
+    alive = _pid_alive(pid) if pid is not None else False
+    if alive:
+        # A live owner is busy, even if the timestamp looks old (a legit
+        # run with no timeout can hold the lock for a long time).
+        return False
+    if pid is None:
+        # No PID recorded: could be a half-written lock from a process that
+        # crashed mid-create at startup — leave it alone (conservative).
+        return False
+    if stamp is None:
+        # Legacy/unparseable lock with a dead/missing PID: fall back to mtime.
+        try:
+            stamp = lf.stat().st_mtime
+        except OSError:
+            return False
+    if now - stamp < STALE_LOCK_SECONDS:
+        return False
+    try:
+        lf.unlink()
+        return True
+    except FileNotFoundError:
+        return True  # someone else already cleaned it
+    except OSError:
+        return False
 
 
 @contextmanager
@@ -51,17 +140,25 @@ def task_lock(task_id: str) -> Iterator[Path]:
     """Acquire an exclusive lock for the given task id.
 
     Raises LockBusyError if another mdrunner process already holds the lock.
+    A leftover lock from a crashed run (dead PID + old timestamp) is
+    reclaimed automatically instead of blocking forever.
     """
     lf = lock_file(task_id)
     lf.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(str(lf), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except OSError as exc:
-        if exc.errno == errno.EEXIST:
+    fd = None
+    for attempt in range(2):
+        try:
+            fd = os.open(str(lf), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except OSError as exc:
+            if exc.errno != errno.EEXIST:
+                raise
+            if attempt == 0 and _remove_if_stale(lf):
+                continue
             raise LockBusyError(f"task {task_id!r} is already running (lock={lf})")
-        raise
+    assert fd is not None
     try:
-        os.write(fd, f"{os.getpid()}\n".encode())
+        os.write(fd, f"{os.getpid()}\n{time.time():.0f}\n".encode())
         os.fsync(fd)
         yield lf
     finally:
@@ -267,6 +364,9 @@ def _skipped_result(task_id: str, reason: str, log_file: str | None = None) -> R
     now = time.time()
     if log_file:
         try:
+            from .runlog import prune_log
+
+            prune_log(Path(log_file))
             with Path(log_file).open("a", encoding="utf-8") as fh:
                 fh.write(
                     f"\n===== mdrunner skip {time.strftime('%Y-%m-%d %H:%M:%S')} "
@@ -345,6 +445,8 @@ def run_task(
     result = _execute(task, agent_cfg, settings.defaults, mode, timeout_override)
     if not result.skipped:
         _record_real_run(task_id)
+    if task.notify_start:
+        _send_start_via_telegram(task, result)
     if result.ok and task.notify_final_message:
         _send_final_message_via_telegram(task, result)
     if result.ok and task.notify_artifact:
@@ -364,6 +466,34 @@ def run_task(
                         f"\n[mdrunner] telegram artifact delivery failed: {result.error}\n"
                     )
     return result
+
+
+def _send_start_via_telegram(task: Task, result: RunResult) -> None:
+    """Best-effort: never fails the run if Telegram is unconfigured."""
+    from . import telegram
+    from .ui import _telegram_settings
+
+    cfg = _telegram_settings.load()
+    bot_token = cfg.get("bot_token")
+    chat_id = cfg.get("chat_id")
+    if not bot_token or not chat_id:
+        return
+    try:
+        telegram.send(
+            bot_token=bot_token,
+            chat_id=chat_id,
+            text=telegram.format_start(task.name),
+            timeout=15.0,
+        )
+    except Exception:  # noqa: BLE001
+        return
+    finally:
+        if result.log_file:
+            try:
+                with Path(result.log_file).open("a", encoding="utf-8") as log_fh:
+                    log_fh.write("\n[mdrunner] telegram start message sent\n")
+            except OSError:
+                pass
 
 
 def _send_final_message_via_telegram(task: Task, result: RunResult) -> None:
@@ -520,6 +650,12 @@ def _preflight_fail(
     run_id = new_run_id(started)
     log_path = task_log_file(task.id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from .runlog import prune_log
+
+        prune_log(log_path)
+    except Exception:  # noqa: BLE001 — pruning must never block a run
+        pass
     prompt = Path(task.prompt_file).expanduser() if task.prompt_file else None
     header = format_start(
         when=started,
@@ -635,7 +771,10 @@ def _execute(
             infer_failure_reason,
             new_run_id,
             parse_agent_session,
+            prune_log,
         )
+
+        prune_log(log_path)
 
         run_id = new_run_id(started)
         prompt_text = stdin_text
@@ -678,7 +817,7 @@ def _execute(
                     log_fh.flush()
 
                     proc = subprocess.Popen(
-                        argv,
+                        wrap_for_windows(argv),
                         cwd=str(cwd) if cwd else None,
                         stdin=subprocess.PIPE if stdin_text is not None else None,
                         stdout=subprocess.PIPE,
@@ -719,7 +858,10 @@ def _execute(
                                     proc.wait(timeout=5)
                                 except subprocess.TimeoutExpired:
                                     _kill_process_tree(proc)
-                                    proc.wait(timeout=5)
+                                    # Grace period: on Windows SIGKILL may not
+                                    # immediately reap child processes, so wait
+                                    # briefly for the tree to actually die.
+                                    _wait_for_exit(proc, TIMEOUT_GRACE_SECONDS)
                                 break
                         exit_code = proc.wait()
                     except KeyboardInterrupt:

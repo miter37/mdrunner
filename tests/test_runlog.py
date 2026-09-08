@@ -6,6 +6,7 @@ from mdrunner.runlog import (
     argv_for_log,
     infer_failure_reason,
     parse_agent_session,
+    prune_log,
 )
 
 
@@ -56,3 +57,37 @@ def test_infer_failure_reason_explicit_error_wins():
     assert infer_failure_reason("Error: x", exit_code=1, timed_out=False, error="interrupted") == (
         "interrupted"
     )
+
+
+def _block(ts: str, body: str = "out\n") -> str:
+    return f"\n===== mdrunner start {ts} =====\nrun=x\ntask=t\n=====\n\n{body}"
+
+
+def test_prune_log_keeps_recent_drops_old(tmp_path: Path):
+    import time
+
+    p = tmp_path / "t.log"
+    old_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 30 * 3600))
+    new_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 3600))
+    p.write_text(_block(old_ts, "old\n") + _block(new_ts, "new\n"), encoding="utf-8")
+    assert prune_log(p) == 1
+    text = p.read_text(encoding="utf-8")
+    assert "old" not in text and "new" in text
+
+
+def test_prune_log_noop_when_nothing_old(tmp_path: Path):
+    import time
+
+    p = tmp_path / "t.log"
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 60))
+    p.write_text(_block(ts), encoding="utf-8")
+    assert prune_log(p) == 0
+    assert "mdrunner start" in p.read_text(encoding="utf-8")
+
+
+def test_prune_log_keeps_unparseable_and_missing(tmp_path: Path):
+    p = tmp_path / "t.log"
+    assert prune_log(p) == 0  # missing file: no-op, no raise
+    p.write_text("agent chatter without headers\n", encoding="utf-8")
+    assert prune_log(p) == 0
+    assert "chatter" in p.read_text(encoding="utf-8")

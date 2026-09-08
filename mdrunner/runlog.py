@@ -14,12 +14,56 @@ import time
 import uuid
 from pathlib import Path
 
-_SESSION_LINE = re.compile(
-    r"(?i)\bsession[ _-]?id\s*[:=]\s*([A-Za-z0-9._/-]{8,})"
-)
-_ERR_LINE = re.compile(
-    r"(?i)^\s*(?:error|failed|fatal|exception)\s*:\s*(.+?)\s*$"
-)
+_SESSION_LINE = re.compile(r"(?i)\bsession[ _-]?id\s*[:=]\s*([A-Za-z0-9._/-]{8,})")
+_START_LINE = re.compile(r"^===== mdrunner start (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+_SKIP_LINE = re.compile(r"^===== mdrunner skip (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+
+
+def prune_log(path: Path, *, keep_hours: float = 24.0) -> int:
+    """Drop run blocks older than ``keep_hours`` from a task log file.
+
+    A block starts at a ``===== mdrunner start <ts> =====`` line (or the
+    ``===== mdrunner skip <ts>`` one-liner, which is also dated) and runs to
+    the next such line. Anything without a parseable timestamp is kept.
+    Returns the number of blocks removed. Never raises.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    cutoff = time.time() - keep_hours * 3600.0
+    lines = text.splitlines(keepends=True)
+    # (start_index, start_epoch or None) for every dated block boundary
+    bounds: list[tuple[int, float | None]] = []
+    for i, line in enumerate(lines):
+        m = _START_LINE.match(line.strip()) or _SKIP_LINE.match(line.strip())
+        if not m:
+            continue
+        try:
+            ts = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+        except (ValueError, OverflowError):
+            ts = None
+        bounds.append((i, ts))
+    if not bounds:
+        return 0
+    keep_from = len(lines)
+    dropped = 0
+    for idx, (start, ts) in enumerate(bounds):
+        if ts is not None and ts < cutoff:
+            dropped += 1
+        else:
+            keep_from = min(keep_from, start)
+            break
+    if keep_from <= 0 or dropped == 0:
+        return 0
+    try:
+        path.write_text("".join(lines[keep_from:]), encoding="utf-8")
+    except OSError:
+        return 0
+    return dropped
+
+
+_ERR_LINE = re.compile(r"(?i)^\s*(?:error|failed|fatal|exception)\s*:\s*(.+?)\s*$")
 
 
 def new_run_id(when: float | None = None) -> str:

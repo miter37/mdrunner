@@ -11,7 +11,12 @@ Adding a new agent:
 from __future__ import annotations
 
 from .agy import AgyAdapter
-from .base import AgentAdapter, ArgvResult, resolve_binary  # re-export
+from .base import (
+    AgentAdapter,
+    ArgvResult,
+    resolve_binary,
+    wrap_for_windows,  # re-export
+)
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
 from .grok import GrokAdapter
@@ -19,7 +24,14 @@ from .hermes import HermesAdapter
 from .openclaw import OpenClawAdapter
 from .opencode import OpenCodeAdapter
 
-__all__ = ["AgentAdapter", "ArgvResult", "ADAPTERS", "get_adapter", "resolve_binary"]
+__all__ = [
+    "AgentAdapter",
+    "ArgvResult",
+    "ADAPTERS",
+    "get_adapter",
+    "resolve_binary",
+    "wrap_for_windows",
+]
 
 
 ADAPTERS: dict[str, AgentAdapter] = {

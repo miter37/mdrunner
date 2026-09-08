@@ -40,6 +40,27 @@ def test_parse_schtasks_repetition_minutes():
     assert windows._parse_repetition_minutes("<Task></Task>") is None
 
 
+def test_install_hides_console_window(monkeypatch):
+    """Scheduled runs wrap in `cmd /c start /min` so no console flashes."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = ""
+        r.stderr = ""
+        return r
+
+    monkeypatch.setattr(windows.subprocess, "run", fake_run)
+    sched = WindowsScheduler()
+    task = Task(id="t", name="t", prompt_file="p.md")
+    sched.install(task, Path(r"C:\mdrunner.exe"))
+    tr = captured["cmd"][captured["cmd"].index("/TR") + 1]
+    assert tr.startswith("cmd /c start") and "/min" in tr
+    assert '"t"' in tr  # task id still quoted inside the wrapper
+
+
 def test_install_quota_poll_creates_minute_schtask(monkeypatch):
     captured = {}
 
@@ -61,6 +82,7 @@ def test_install_quota_poll_creates_minute_schtask(monkeypatch):
     tr = cmd[cmd.index("/TR") + 1]
     assert "quota-tick" in tr
     assert "mdrunner.exe" in tr
+    assert tr.startswith("cmd /c start") and "/min" in tr
 
 
 def test_quota_poll_installed_and_next_run(monkeypatch):

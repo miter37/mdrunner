@@ -63,6 +63,23 @@ def send(
         return False, str(exc)
 
 
+def format_quota_alert(alert_name: str, agent: str, detail: str, message: str = "") -> str:
+    """Standardize the quota-alert message body sent to Telegram.
+
+    Header (name + agent) is fixed; below it goes the user-authored
+    message from alert registration. The raw condition verdict is kept
+    only as a fallback when no message was registered.
+    """
+    head = f"mdrunner: quota alert '{alert_name}' fired\nagent: {agent}"
+    body = (message or "").strip()
+    return f"{head}\n{body}" if body else f"{head}\n{detail}"
+
+
+def format_start(task_name: str) -> str:
+    """One-line started message, matching the existing failure/artifact tone."""
+    return f"▶️ [mdrunner] '{task_name}' 작업 시작"
+
+
 def format_failure(task_name: str, result: dict[str, Any]) -> str:
     """Standardize the failure message body sent to Telegram."""
     duration = result.get("duration", 0.0)
@@ -114,21 +131,21 @@ def send_document(
     # chat_id
     parts.append(f"--{boundary}")
     parts.append('Content-Disposition: form-data; name="chat_id"')
-    parts.append('')
+    parts.append("")
     parts.append(chat_id)
 
     # caption
     if caption:
         parts.append(f"--{boundary}")
         parts.append('Content-Disposition: form-data; name="caption"')
-        parts.append('')
+        parts.append("")
         parts.append(caption)
 
     # document file
     parts.append(f"--{boundary}")
     parts.append(f'Content-Disposition: form-data; name="document"; filename="{path.name}"')
-    parts.append(f'Content-Type: {mime_type}')
-    parts.append('')
+    parts.append(f"Content-Type: {mime_type}")
+    parts.append("")
 
     header_bytes = "\r\n".join(parts).encode("utf-8") + b"\r\n"
     with path.open("rb") as f:

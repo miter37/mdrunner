@@ -366,6 +366,31 @@ def cmd_quota_tick(args: argparse.Namespace) -> int:
     results = quota_summary(probe)
     save_snapshot(results)
     snap = load_snapshot()
+
+    # Standalone quota alerts ride the same refresh: edge-triggered Telegram
+    # messages, one per false→true transition.
+    try:
+        from .alerts import evaluate_alerts, load_alerts, send_alert_fires
+
+        alert_probes = [a.agent for a in load_alerts() if a.enabled]
+        extra = [a for a in alert_probes if a not in probe]
+        if extra:
+            save_snapshot(quota_summary(list(dict.fromkeys(probe + extra))))
+            snap = load_snapshot()
+        fires, _ = evaluate_alerts(load_alerts(), snap)
+        if fires:
+            if args.dry_run:
+                for f in fires:
+                    print(f"  WOULD ALERT  {f.alert.id}  ({f.detail})")
+            else:
+                for aid, ok, detail in send_alert_fires(fires):
+                    if ok:
+                        print(f"  alert  {aid}  (telegram sent)")
+                    else:
+                        print(f"  alert  {aid}  (send failed: {detail})")
+    except Exception as exc:  # noqa: BLE001 — alerts must not wedge the tick
+        print(f"quota-tick: alert check skipped ({exc})", file=sys.stderr)
+
     if not conditional:
         print("quota-tick: snapshot refreshed; no quota-triggered tasks", file=sys.stderr)
         return 0
@@ -562,6 +587,19 @@ def cmd_schedule_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_schedule_overview(args: argparse.Namespace) -> int:
+    from .schedule_view import project_week, render_text
+
+    try:
+        tasks = load_tasks(tasks_file())
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
+    days = max(1, min(int(args.days or 7), 14))
+    print(render_text(project_week(tasks, days=days)))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -657,6 +695,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_sched_status = sub.add_parser("schedule-status", help="show OS scheduler status for task")
     p_sched_status.add_argument("task_id")
     p_sched_status.set_defaults(func=cmd_schedule_status)
+
+    p_sched_overview = sub.add_parser(
+        "schedule-overview", help="project the next N days of firings from tasks.yaml"
+    )
+    p_sched_overview.add_argument("--days", type=int, default=7)
+    p_sched_overview.set_defaults(func=cmd_schedule_overview)
 
     return p
 

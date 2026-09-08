@@ -31,7 +31,12 @@ def test_task_roundtrip() -> None:
         "model": "anthropic/claude-sonnet-4-5",
         "prompt_file": "/tmp/demo.md",
         "working_dir": "/tmp",
-        "schedule": {"mode": "weekly", "days": ["mon", "wed", "fri"], "time": "08:30", "timezone": "Asia/Seoul"},
+        "schedule": {
+            "mode": "weekly",
+            "days": ["mon", "wed", "fri"],
+            "time": "08:30",
+            "timezone": "Asia/Seoul",
+        },
         "extra_args": ["--foo", "bar"],
         "timeout_minutes": 15,
         "on_failure": {"notify": True},
@@ -152,6 +157,10 @@ def test_artifact_config_roundtrip(tmp_path: Path) -> None:
     assert task_dict["artifact_dir"] == "/path/to/artifacts"
     assert task_dict["artifact_extensions"] == [".txt", ".json"]
     assert task_from_dict(task_dict) == t
+    assert (
+        task_to_dict(task_from_dict({"id": "s", "name": "S", "notify_start": True}))["notify_start"]
+        is True
+    )
 
     # 2. Test Task defaults when fields are omitted
     task_default_raw = {
@@ -161,6 +170,7 @@ def test_artifact_config_roundtrip(tmp_path: Path) -> None:
     t_def = task_from_dict(task_default_raw)
     assert t_def.notify_artifact is False
     assert t_def.notify_final_message is False
+    assert t_def.notify_start is False
     assert t_def.artifact_dir is None
     assert t_def.artifact_extensions == [".md"]
 
@@ -366,27 +376,19 @@ def test_weekly_empty_days_rejected() -> None:
 
 def test_invalid_schedule_time_rejected() -> None:
     with pytest.raises(ConfigError, match="time"):
-        task_from_dict(
-            {"id": "x", "name": "x", "schedule": {"mode": "daily", "time": "25:00"}}
-        )
+        task_from_dict({"id": "x", "name": "x", "schedule": {"mode": "daily", "time": "25:00"}})
     with pytest.raises(ConfigError, match="time"):
-        task_from_dict(
-            {"id": "x", "name": "x", "schedule": {"mode": "daily", "time": "1440"}}
-        )
+        task_from_dict({"id": "x", "name": "x", "schedule": {"mode": "daily", "time": "1440"}})
 
 
 def test_yaml_time_with_seconds_is_normalized() -> None:
-    t = task_from_dict(
-        {"id": "x", "name": "x", "schedule": {"mode": "daily", "time": "07:25:00"}}
-    )
+    t = task_from_dict({"id": "x", "name": "x", "schedule": {"mode": "daily", "time": "07:25:00"}})
     assert t.schedule.time == "07:25"
 
 
 def test_yaml_sexagesimal_midnight_hour_is_normalized() -> None:
     """Unquoted `0:30` becomes YAML int 30; must still be 00:30, not '30'."""
-    t = task_from_dict(
-        {"id": "x", "name": "x", "schedule": {"mode": "daily", "time": 30}}
-    )
+    t = task_from_dict({"id": "x", "name": "x", "schedule": {"mode": "daily", "time": 30}})
     assert t.schedule.time == "00:30"
 
 

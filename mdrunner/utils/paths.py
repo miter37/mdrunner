@@ -100,3 +100,13 @@ def task_log_file(task_id: str) -> Path:
 
 def lock_file(task_id: str) -> Path:
     return log_dir() / f"{task_id}.lock"
+
+
+def alerts_file() -> Path:
+    """User-authored quota-alert rules (Telegram on engine quota states)."""
+    return config_dir() / "alerts.json"
+
+
+def alert_state_file() -> Path:
+    """Edge-trigger bookkeeping for quota alerts (armed/disarmed per alert)."""
+    return state_dir() / "alert-state.json"

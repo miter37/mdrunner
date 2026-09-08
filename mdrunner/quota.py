@@ -27,7 +27,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 from typing import Optional
 
-from .agents import resolve_binary
+from .agents import resolve_binary, wrap_for_windows
 
 # The 4 agents the quota panel tracks (subscription coding CLIs).
 QUOTA_AGENTS = ("claude", "codex", "agy", "grok")
@@ -70,6 +70,10 @@ class QuotaResult:
     windows: list[QuotaWindow] = field(default_factory=list)
     note: Optional[str] = None  # extra human context (e.g. reset credits)
     error: Optional[str] = None  # set when available is False
+    # True when the only missing piece is the statusLine sink hook
+    # (Windows has no PTY, so claude/agy can only report via the sink).
+    # The GUI uses this to show setup guidance instead of the raw error.
+    needs_sink: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -109,7 +113,9 @@ def _duration_to_resets_at(text: str, *, now: Optional[float] = None) -> Optiona
     return base + timedelta(days=d, hours=h, minutes=mi).total_seconds()
 
 
-def _clock_to_resets_at(when: str, tz: str, *, now_dt: Optional[datetime] = None) -> Optional[float]:
+def _clock_to_resets_at(
+    when: str, tz: str, *, now_dt: Optional[datetime] = None
+) -> Optional[float]:
     """Claude's reset strings: '2:10pm' (next occurrence) or
     'Sep 12, 11pm' (that date). ``tz`` is an IANA name shown in the screen."""
     try:
@@ -134,8 +140,12 @@ def _clock_to_resets_at(when: str, tz: str, *, now_dt: Optional[datetime] = None
             # anchor a year so strptime doesn't warn / mis-handle leap day
             t = datetime.strptime(f"{now_local.year} {w}", f"%Y {fmt}")
             cand = now_local.replace(
-                month=t.month, day=t.day, hour=t.hour, minute=t.minute,
-                second=0, microsecond=0,
+                month=t.month,
+                day=t.day,
+                hour=t.hour,
+                minute=t.minute,
+                second=0,
+                microsecond=0,
             )
             if cand <= now_local:
                 cand = cand.replace(year=cand.year + 1)
@@ -194,7 +204,7 @@ def _probe_codex(binary: str, timeout: float = 20.0) -> QuotaResult:
 
     try:
         proc = subprocess.Popen(
-            [path, "app-server"],
+            wrap_for_windows([path, "app-server"]),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -276,8 +286,10 @@ def _probe_codex(binary: str, timeout: float = 20.0) -> QuotaResult:
     # Prefer the multi-bucket view keyed by limit id; fall back to the
     # back-compat single-bucket ``rateLimits``.
     by_id = result_payload.get("rateLimitsByLimitId") or {}
-    rl = by_id.get("codex") or next(iter(by_id.values()), None) or (
-        result_payload.get("rateLimits") or {}
+    rl = (
+        by_id.get("codex")
+        or next(iter(by_id.values()), None)
+        or (result_payload.get("rateLimits") or {})
     )
     windows: list[QuotaWindow] = []
     for key in ("primary", "secondary"):
@@ -418,7 +430,9 @@ def _probe_claude(binary: str, timeout: float = 30.0) -> QuotaResult:
     from . import _ptyusage
 
     if not _ptyusage.supported():
-        return QuotaResult("claude", False, error="PTY scrape unsupported on this platform")
+        return QuotaResult(
+            "claude", False, error="PTY scrape unsupported on this platform", needs_sink=True
+        )
 
     def _once() -> tuple:
         # Claude may open a "trust this folder?" prompt (default "No, exit") —
@@ -477,7 +491,7 @@ def _parse_agy_usage(text: str, group: str = "GEMINI MODELS") -> list[QuotaWindo
     gi = up.find(group)
     if gi == -1:
         return []
-    rest = up[gi + len(group):]
+    rest = up[gi + len(group) :]
     # stop at the next ALL-CAPS "... MODELS" header
     nxt = re.search(r"\n[A-Z][A-Z /]+MODELS", rest)
     section = rest[: nxt.start()] if nxt else rest
@@ -506,7 +520,9 @@ def _probe_agy(binary: str, timeout: float = 32.0) -> QuotaResult:
     from . import _ptyusage
 
     if not _ptyusage.supported():
-        return QuotaResult("agy", False, error="PTY scrape unsupported on this platform")
+        return QuotaResult(
+            "agy", False, error="PTY scrape unsupported on this platform", needs_sink=True
+        )
     text = _ptyusage.capture_screen(
         [path],
         cwd=os.path.expanduser("~"),
@@ -521,9 +537,7 @@ def _probe_agy(binary: str, timeout: float = 32.0) -> QuotaResult:
     )
     windows = _parse_agy_usage(text)
     if not windows:
-        return QuotaResult(
-            "agy", False, error="could not parse /usage screen (format changed?)"
-        )
+        return QuotaResult("agy", False, error="could not parse /usage screen (format changed?)")
     return QuotaResult(
         "agy",
         available=True,
@@ -571,7 +585,7 @@ def _grok_account_id() -> Optional[str]:
         auth = json.loads(open(os.path.join(home, "auth.json")).read())
     except (OSError, json.JSONDecodeError):
         return None
-    for v in (auth.values() if isinstance(auth, dict) else []):
+    for v in auth.values() if isinstance(auth, dict) else []:
         if isinstance(v, dict):
             aid = v.get("user_id") or v.get("email") or v.get("principal_id")
             if aid:
@@ -655,10 +669,7 @@ def _grok_result(entry: dict, *, fresh_after: float) -> QuotaResult:
         "grok",
         available=True,
         source="billing-log",
-        confidence=(
-            "authoritative" if (used is not None and not stale)
-            else "estimated"
-        ),
+        confidence=("authoritative" if (used is not None and not stale) else "estimated"),
         observed_at=observed,
         plan=entry.get("tier"),
         account=_acct_hash(str(acct)) if acct else None,
@@ -691,8 +702,7 @@ def _probe_grok(binary: str, timeout: float = 24.0) -> QuotaResult:
                     [path],
                     cwd=os.path.expanduser("~"),
                     steps=[
-                        (("await", r"Navigate|for shortcuts|\bhelp\b|›|▌|esc to", 12.0),
-                         "/usage"),
+                        (("await", r"Navigate|for shortcuts|\bhelp\b|›|▌|esc to", 12.0), "/usage"),
                         (0.4, "\r"),
                     ],
                     stop_when=None,
@@ -707,7 +717,9 @@ def _probe_grok(binary: str, timeout: float = 24.0) -> QuotaResult:
             entry = fresh
     if not entry:
         return QuotaResult(
-            "grok", False, source="none",
+            "grok",
+            False,
+            source="none",
             error="no billing snapshot in ~/.grok/logs/unified.jsonl (run grok once)",
         )
     return _grok_result(entry, fresh_after=FRESH)

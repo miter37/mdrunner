@@ -136,8 +136,12 @@ def test_quota_panel_results_handler(app_and_window) -> None:
                 "confidence": "authoritative",
                 "plan": "plus",
                 "windows": [
-                    {"label": "weekly", "used_percent": 40, "resets_at": None,
-                     "window_minutes": 10080}
+                    {
+                        "label": "weekly",
+                        "used_percent": 40,
+                        "resets_at": None,
+                        "window_minutes": 10080,
+                    }
                 ],
             }
         ]
@@ -182,6 +186,7 @@ def test_task_dialog_notifications_integration(app_and_window) -> None:
         on_failure=OnFailure(notify=True),
         notify_artifact=True,
         notify_final_message=True,
+        notify_start=True,
         artifact_dir="/tmp/artifacts",
         artifact_extensions=[".png", ".pdf"],
     )
@@ -192,6 +197,7 @@ def test_task_dialog_notifications_integration(app_and_window) -> None:
     assert dlg.in_notify_fail.isChecked() is True
     assert dlg.in_notify_artifact.isChecked() is True
     assert dlg.in_notify_final.isChecked() is True
+    assert dlg.in_notify_start.isChecked() is True
     assert dlg.in_artifact_dir.text() == "/tmp/artifacts"
     assert dlg.in_artifact_ext.text() == ".png, .pdf"
 
@@ -204,6 +210,7 @@ def test_task_dialog_notifications_integration(app_and_window) -> None:
     dlg.in_notify_fail.setChecked(False)
     # We also change notify artifact back to True, and fields to check acceptance save
     dlg.in_notify_artifact.setChecked(True)
+    dlg.in_notify_start.setChecked(False)
     dlg.in_artifact_dir.setText("/tmp/new_artifacts")
     dlg.in_artifact_ext.setText(".md, .html")
 
@@ -220,6 +227,7 @@ def test_task_dialog_notifications_integration(app_and_window) -> None:
     assert saved_task.on_failure.notify is False
     assert saved_task.notify_artifact is True
     assert saved_task.notify_final_message is True
+    assert saved_task.notify_start is False
     assert saved_task.artifact_dir == "/tmp/new_artifacts"
     assert saved_task.artifact_extensions == [".md", ".html"]
 
@@ -294,7 +302,54 @@ def _seed_opencode_settings() -> None:
 
 
 @pytest.mark.gui
-def test_settings_dialog_defaults_integration(app_and_window) -> None:
+def test_settings_model_combo_opens_wide(app_and_window) -> None:
+    """Long model names must stay readable: the closed box sizes to its
+    contents and the popup opens wider than the dialog column."""
+    _app, win = app_and_window
+    from mdrunner.config import Settings, AgentConfig
+    from mdrunner.ui.settings_dialog import SettingsDialog
+
+    settings = Settings(agents={"agy": AgentConfig(binary="agy")})
+    dlg = SettingsDialog(parent=win, settings=settings)
+    assert dlg.in_default_model.minimumWidth() >= 420
+    assert dlg.in_default_model.view().minimumWidth() >= 560
+    dlg.deleteLater()
+
+
+@pytest.mark.gui
+def test_quota_panel_shows_sink_setup_for_missing_hook(app_and_window) -> None:
+    """A PTY-less platform degrades to setup guidance, not a raw error."""
+    _app, win = app_and_window
+    win._render_quota_rows(
+        [
+            {
+                "agent": "claude",
+                "available": False,
+                "source": "none",
+                "error": "PTY scrape unsupported on this platform",
+                "needs_sink": True,
+                "windows": [],
+            },
+        ]
+    )
+    texts = [win.quota_table.item(0, c).text() for c in range(win.quota_table.columnCount())]
+    assert texts[0] == "claude"
+    assert texts[1] == "needs setup"
+    assert "quota-sink-setup claude --write" in (win.quota_table.item(0, 1).toolTip() or "")
+    # a plain error (no flag) still renders as-is with its tooltip
+    win._render_quota_rows(
+        [
+            {
+                "agent": "grok",
+                "available": False,
+                "source": "none",
+                "error": "no billing snapshot",
+                "windows": [],
+            },
+        ]
+    )
+    assert win.quota_table.item(0, 1).text() == "no billing snapshot"
+    assert win.quota_table.item(0, 1).toolTip() == "no billing snapshot"
     _app, win = app_and_window
     from mdrunner.ui.settings_dialog import SettingsDialog
     from mdrunner.config import Settings, Defaults
@@ -569,13 +624,18 @@ def test_settings_dialog_detect_binary_fallback(app_and_window, monkeypatch) -> 
     dlg = SettingsDialog(parent=win, settings=settings)
 
     # Mock shutil.which to return a dummy path for "my-special-agent"
-    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/my-special-agent" if cmd == "my-special-agent" else None)
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda cmd: "/usr/bin/my-special-agent" if cmd == "my-special-agent" else None,
+    )
 
     # in_binary is empty initially (as binary is "")
     assert dlg.in_binary.text() == ""
 
     # Mock QMessageBox.information to do nothing
     from PySide6.QtWidgets import QMessageBox
+
     monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: None)
 
     # Trigger detect binary
@@ -585,7 +645,6 @@ def test_settings_dialog_detect_binary_fallback(app_and_window, monkeypatch) -> 
     assert dlg.in_binary.text() == "/usr/bin/my-special-agent"
 
     dlg.deleteLater()
-
 
 
 def _seed_quota_settings() -> None:
@@ -643,10 +702,62 @@ def test_task_dialog_quota_mode_locks_run_limits(app_and_window) -> None:
     assert not dlg.in_time.isEnabled()
     assert all(not cb.isEnabled() for cb in dlg.day_checks.values())
     # codex reports both windows → all 4 grid cells are available
-    for attr, (cb, _sb) in dlg.qc_cells.items():
+    for attr, (cb, _sb) in dlg.qc_grid.cells.items():
         assert cb.isEnabled(), attr
 
     dlg.deleteLater()
+
+
+@pytest.mark.gui
+def test_same_task_is_blocked_but_other_tasks_run_in_parallel(app_and_window, monkeypatch) -> None:
+    """Same task id → busy notice; a different task still starts a worker."""
+    _app, win = app_and_window
+    from PySide6.QtWidgets import QMessageBox
+
+    from mdrunner.config import Settings, Task
+
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+
+    t1 = Task(id="p1", name="P1", agent="opencode", prompt_file="p.md")
+    t2 = Task(id="p2", name="P2", agent="opencode", prompt_file="p.md")
+    win.tasks = [t1, t2]
+    win.settings = Settings()
+    started: list[str] = []
+
+    class FakeWorker:
+        def __init__(self, task, **kw):
+            self.task = task
+            started.append(task.id)
+            from PySide6.QtCore import QObject, Signal
+
+            class S(QObject):
+                line = Signal(str)
+                finished_with_result = Signal(dict)
+
+            self.signals = S()
+            self.line = self.signals.line
+            self.finished_with_result = self.signals.finished_with_result
+
+        def start(self):
+            pass
+
+    import mdrunner.ui.main_window as mw
+
+    real = mw.TaskRunWorker
+    mw.TaskRunWorker = FakeWorker
+    try:
+        win._run_workers = {}
+        win._start_task_run(t1, mode="manual")
+        assert "p1" in win._run_workers
+        before = len(started)
+        win._start_task_run(t1, mode="manual")  # same id → blocked
+        assert len(started) == before
+        win._start_task_run(t2, mode="manual")  # different id → runs
+        assert "p2" in win._run_workers
+        assert len(started) == before + 1
+    finally:
+        mw.TaskRunWorker = real
+        win._run_workers = {}
 
 
 @pytest.mark.gui
@@ -663,13 +774,11 @@ def test_task_dialog_quota_condition_saves_and_reloads(app_and_window) -> None:
     dlg.in_name.setText("Quota Trigger Demo")
     dlg.in_agent.setCurrentText("codex")
     dlg.in_mode.setCurrentIndex(dlg.in_mode.findData("quota"))
-    wk_used_cb, wk_used_sb = dlg.qc_cells["weekly_used"]
-    wk_reset_cb, wk_reset_sb = dlg.qc_cells["weekly_reset"]
+    wk_used_cb, wk_used_sb = dlg.qc_grid.cells["weekly_used"]
+    wk_reset_cb, wk_reset_sb = dlg.qc_grid.cells["weekly_reset"]
     wk_used_cb.setChecked(True)
     wk_used_sb.setValue(85)
-    dlg.qc_ops["weekly_used"].setCurrentIndex(
-        dlg.qc_ops["weekly_used"].findData("lte")
-    )
+    dlg.qc_grid.ops["weekly_used"].setCurrentIndex(dlg.qc_grid.ops["weekly_used"].findData("lte"))
     wk_reset_cb.setChecked(True)
     wk_reset_sb.setValue(12)
     dlg.in_prompt_source.setCurrentIndex(dlg.in_prompt_source.findData("inline"))
@@ -688,9 +797,9 @@ def test_task_dialog_quota_condition_saves_and_reloads(app_and_window) -> None:
 
     dlg2 = TaskDialog(parent=win, settings=win.settings, task=saved)
     assert dlg2.in_qc_enabled.isChecked()
-    cb2, sb2 = dlg2.qc_cells["weekly_used"]
+    cb2, sb2 = dlg2.qc_grid.cells["weekly_used"]
     assert cb2.isChecked() and sb2.value() == 85
-    assert dlg2.qc_ops["weekly_used"].currentData() == "lte"
+    assert dlg2.qc_grid.ops["weekly_used"].currentData() == "lte"
     dlg.deleteLater()
     dlg2.deleteLater()
 
@@ -731,9 +840,14 @@ def test_task_dialog_five_hour_row_disabled_for_grok(app_and_window) -> None:
         yaml.safe_dump(
             {
                 "agents": {
-                    "grok": {"enabled": True, "binary": "grok", "default_model": "",
-                             "health_cmd": ["grok", "--version"],
-                             "bypass": {"scheduled": [], "manual": []}, "presets": []},
+                    "grok": {
+                        "enabled": True,
+                        "binary": "grok",
+                        "default_model": "",
+                        "health_cmd": ["grok", "--version"],
+                        "bypass": {"scheduled": [], "manual": []},
+                        "presets": [],
+                    },
                 },
                 "defaults": {"timeout_minutes": 5},
             }
@@ -745,9 +859,9 @@ def test_task_dialog_five_hour_row_disabled_for_grok(app_and_window) -> None:
     dlg = TaskDialog(parent=win, settings=win.settings, task=None)
     dlg.in_agent.setCurrentText("grok")
     dlg.in_qc_enabled.setChecked(True)
-    assert dlg.qc_cells["weekly_used"][0].isEnabled()
-    assert not dlg.qc_cells["fivehour_used"][0].isEnabled()
-    assert not dlg.qc_cells["fivehour_reset"][0].isEnabled()
+    assert dlg.qc_grid.cells["weekly_used"][0].isEnabled()
+    assert not dlg.qc_grid.cells["fivehour_used"][0].isEnabled()
+    assert not dlg.qc_grid.cells["fivehour_reset"][0].isEnabled()
     dlg.deleteLater()
 
 
@@ -806,8 +920,10 @@ def test_main_table_shows_quota_condition_tag(app_and_window) -> None:
     win.refresh_all()
 
     sched_col = 2
-    texts = {win.table.item(r, 0).text(): win.table.item(r, sched_col).text()
-             for r in range(win.table.rowCount())}
+    texts = {
+        win.table.item(r, 0).text(): win.table.item(r, sched_col).text()
+        for r in range(win.table.rowCount())
+    }
     assert "codex: wk used≥90%" in texts["Gated daily"]
     assert "daily" in texts["Gated daily"]
     assert texts["Pure trigger"].startswith("codex: 5h resets≤3h")
@@ -836,7 +952,7 @@ def test_task_dialog_used_zero_percent_roundtrips(app_and_window) -> None:
         ),
     )
     dlg = TaskDialog(parent=win, settings=win.settings, task=task)
-    cb, sb = dlg.qc_cells["weekly_used"]
+    cb, sb = dlg.qc_grid.cells["weekly_used"]
     assert cb.isChecked()
     assert sb.value() == 0
     dlg.deleteLater()
@@ -905,3 +1021,47 @@ def test_toggle_disabled_updates_os_schedule(app_and_window, monkeypatch) -> Non
     win.table.selectRow(0)
     win._on_toggle()  # False -> True: install
     fake.install.assert_called()
+
+
+@pytest.mark.gui
+def test_quota_condition_widget_and_alert_dialog(app_and_window) -> None:
+    """Shared 2x2 grid edits a QuotaCondition; AlertDialog round-trips one."""
+    _app, win = app_and_window
+    from mdrunner.config import QuotaCondition
+    from mdrunner.ui.alert_dialog import AlertDialog
+    from mdrunner.ui.quota_condition_widget import QuotaConditionWidget
+
+    w = QuotaConditionWidget()
+    w.set_agent("claude")
+    w.set_master_enabled(True)
+    cb, _sb = w.cells["weekly_used"]
+    cb.setChecked(True)
+    assert isinstance(w.condition(), QuotaCondition)
+
+    w.set_agent("grok")  # weekly-only: 5h row forced off
+    cb5, _sb5 = w.cells["fivehour_used"]
+    cb5.setChecked(True)
+    assert cb5.isChecked() is False
+
+    dlg = AlertDialog(parent=win)
+    dlg.in_name.setText("weekly high")
+    dlg.in_agent.setCurrentText("claude")
+    qcb, _qsb = dlg.cond.cells["weekly_used"]
+    qcb.setChecked(True)
+    dlg._on_accept()
+    assert dlg.alert is not None and dlg.alert.agent == "claude"
+    assert dlg.alert.condition.weekly_used.enabled is True
+    dlg.deleteLater()
+    w.deleteLater()
+
+
+@pytest.mark.gui
+def test_quota_dock_renders_alert_section(app_and_window) -> None:
+    """Right dock shows the alerts section with working CRUD buttons."""
+    _app, win = app_and_window
+    assert win.alert_list is not None
+    assert win.alert_add_btn.isEnabled()
+    # an empty rule set leaves room for a setup hint (visibility itself is
+    # dock-dependent offscreen, so assert the text logic, not show state)
+    win._refresh_alert_list()
+    assert win.alert_hint.text() != ""

@@ -110,23 +110,50 @@ def test_quota_sink_extracts_claude_and_agy():
     from mdrunner import quota_sink
 
     c = quota_sink._extract_claude(
-        {"rate_limits": {"five_hour": {"used_percentage": 20, "resets_at": 111},
-                         "seven_day": {"used_percentage": 55, "resets_at": 222}},
-         "subscription": "Max"}
+        {
+            "rate_limits": {
+                "five_hour": {"used_percentage": 20, "resets_at": 111},
+                "seven_day": {"used_percentage": 55, "resets_at": 222},
+            },
+            "subscription": "Max",
+        }
     )
     assert c["plan"] == "Max"
-    assert {(w["label"], w["used_percent"]) for w in c["windows"]} == {("5h", 20.0), ("weekly", 55.0)}
+    assert {(w["label"], w["used_percent"]) for w in c["windows"]} == {
+        ("5h", 20.0),
+        ("weekly", 55.0),
+    }
 
     a = quota_sink._extract_agy(
-        {"quota": {"gemini-weekly": {"remaining_fraction": 0.75,
-                                     "reset_time": "2099-01-01T00:00:00Z"},
-                   "gemini-five-hour": {"remaining_fraction": 1.0, "reset_in_seconds": 3600}},
-         "plan_tier": "Pro", "email": "x@y.z"}
+        {
+            "quota": {
+                "gemini-weekly": {"remaining_fraction": 0.75, "reset_time": "2099-01-01T00:00:00Z"},
+                "gemini-five-hour": {"remaining_fraction": 1.0, "reset_in_seconds": 3600},
+            },
+            "plan_tier": "Pro",
+            "email": "x@y.z",
+        }
     )
     aw = {w["label"]: w for w in a["windows"]}
     assert aw["weekly"]["used_percent"] == 25.0
     assert aw["5h"]["used_percent"] == 0.0 and aw["5h"]["resets_at"] is not None
     assert a["plan"] == "Pro" and a["account"]
+
+
+def test_pty_unsupported_marks_sink_setup(monkeypatch):
+    """On platforms without a PTY (e.g. Windows), claude/agy degrade with a
+    flag the GUI turns into sink-setup guidance — PTY probing itself is
+    untouched on Linux/macOS."""
+    from mdrunner import quota
+
+    monkeypatch.setattr("mdrunner._ptyusage.supported", lambda: False)
+    for agent, probe in (("claude", quota._probe_claude), ("agy", quota._probe_agy)):
+        monkeypatch.setattr(quota, "_resolve_cli", lambda _b, _a=agent: f"/usr/bin/{_a}")
+        r = probe(agent)
+        assert r.available is False
+        assert r.needs_sink is True
+        d = r.to_dict()
+        assert d["needs_sink"] is True  # survives the snapshot round-trip
 
 
 def test_quota_sink_reads_back_via_probe(monkeypatch, tmp_path):
@@ -137,12 +164,20 @@ def test_quota_sink_reads_back_via_probe(monkeypatch, tmp_path):
 
     monkeypatch.setenv("RUNCHER_STATE_DIR", str(tmp_path / "st"))
     monkeypatch.setattr(
-        _sys, "stdin",
-        type("S", (), {"buffer": io.BytesIO(
-            b'{"rate_limits":{"seven_day":{"used_percentage":88,"resets_at":9}}}')})(),
+        _sys,
+        "stdin",
+        type(
+            "S",
+            (),
+            {
+                "buffer": io.BytesIO(
+                    b'{"rate_limits":{"seven_day":{"used_percentage":88,"resets_at":9}}}'
+                )
+            },
+        )(),
     )
     assert quota_sink.run(["claude"]) == 0  # acts as the statusLine hook
-    r = quota._probe_claude("claude")       # now reads the file, no PTY
+    r = quota._probe_claude("claude")  # now reads the file, no PTY
     assert r.available and r.source == "statusline"
     assert r.windows[0].used_percent == 88.0
 
@@ -273,9 +308,16 @@ def test_probe_codex_binary_missing(tmp_path: Path):
 
 
 def test_quota_summary_default_agents(monkeypatch):
-    monkeypatch.setattr(quota, "_probe_codex", lambda b, timeout=20.0: QuotaResult(
-        "codex", available=True, confidence="authoritative",
-        windows=[QuotaWindow("weekly", 10, None, 10080)]))
+    monkeypatch.setattr(
+        quota,
+        "_probe_codex",
+        lambda b, timeout=20.0: QuotaResult(
+            "codex",
+            available=True,
+            confidence="authoritative",
+            windows=[QuotaWindow("weekly", 10, None, 10080)],
+        ),
+    )
     rows = quota_summary()
     assert [r.agent for r in rows] == list(quota.QUOTA_AGENTS)
     codex_row = next(r for r in rows if r.agent == "codex")

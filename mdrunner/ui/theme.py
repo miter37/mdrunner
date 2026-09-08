@@ -304,6 +304,14 @@ QProgressBar::chunk {{ background: {p['accent']}; border-radius: 4px; }}
 
 QTableView#quotaTable::item {{ padding: 3px 7px; }}
 QTableView#quotaTable {{ border: 0; background: {p['surface']}; }}
+QListWidget#alertList {{
+    background: {p['surface']}; color: {p['text']};
+    border: 1px solid {p['border']}; border-radius: 8px;
+    outline: 0; padding: 3px;
+}}
+QListWidget#alertList::item {{ padding: 4px 8px; border: 0; border-radius: 5px; }}
+QListWidget#alertList::item:selected {{ background: {p['sel']}; color: {p['text']}; }}
+QFrame#alertSep {{ color: {p['border']}; }}
 QLabel#dim {{ color: {p['text_dim']}; }}
 QLabel#logHeader {{ color: {p['text_dim']}; font-size: 11px; font-weight: 700;
     text-transform: uppercase; letter-spacing: 0.7px; padding: 6px 4px; }}

@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from .config import QUOTA_CAPABLE_AGENTS, Task
+from .config import QUOTA_CAPABLE_AGENTS, QuotaCondition, Task
 
 # how old the snapshot may be before the gate re-probes that one agent
 _SNAPSHOT_MAX_AGE = 900.0  # 15 min
@@ -35,6 +35,9 @@ _STATIC_WINDOWS = {
 class GateDecision:
     allowed: bool
     reason: str
+    unknown: bool = False  # True when quota data was incomplete (callers may
+    # treat this differently from a clean allow/deny — e.g. quota alerts
+    # never fire on unknown, regardless of on_unknown)
 
 
 def available_windows(agent: str, snapshot: Optional[dict] = None) -> tuple[str, ...]:
@@ -118,13 +121,25 @@ def _clause_result(
 
 
 def _quota_met(task: Task, snapshot: Optional[dict]) -> GateDecision:
-    c = task.quota_condition
+    return quota_condition_met(task.agent, task.quota_condition, snapshot)
+
+
+def quota_condition_met(
+    agent: str,
+    condition: QuotaCondition | None,
+    snapshot: dict | None = None,
+) -> GateDecision:
+    """Evaluate a 2x2 quota condition against a snapshot. ``task``-free so
+    standalone quota alerts can share the exact same verdict logic."""
+    c: QuotaCondition | None = condition
     assert c is not None
     now = time.time()
-    windows, data_ok, note = _agent_windows_now(task.agent, snapshot)
+    windows, data_ok, note = _agent_windows_now(agent, snapshot)
     if not data_ok:
         allow = c.on_unknown == "run"
-        return GateDecision(allow, f"quota unknown ({note}) → {'run' if allow else 'skip'}")
+        return GateDecision(
+            allow, f"quota unknown ({note}) → {'run' if allow else 'skip'}", True
+        )
 
     by_label = {w.get("label"): w for w in windows}
     results: list[bool] = []
@@ -143,11 +158,14 @@ def _quota_met(task: Task, snapshot: Optional[dict]) -> GateDecision:
         return GateDecision(
             allow,
             f"quota data incomplete [{', '.join(unknown)}] → {'run' if allow else 'skip'}",
+            True,
         )
 
     met = all(results)
     verb = "all clauses met" if met else "clause(s) not met"
-    return GateDecision(met, f"{c.describe(task.agent)} — {verb}: {'; '.join(details)}")
+    return GateDecision(
+        met, f"{c.describe(agent)} — {verb}: {'; '.join(details)}"
+    )
 
 
 def check_task_gate(

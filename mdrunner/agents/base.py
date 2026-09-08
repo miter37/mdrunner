@@ -8,6 +8,7 @@ registering it in `mdrunner/agents/__init__.py`.
 from __future__ import annotations
 
 import shutil
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +60,21 @@ def resolve_binary(binary: str) -> str | None:
     if p.is_absolute():
         return str(p) if p.exists() else None
     return shutil.which(binary)
+
+
+def wrap_for_windows(argv: list[str]) -> list[str]:
+    """Wrap ``argv`` so Windows can launch script shims directly.
+
+    npm-installed agent CLIs are often ``tool.cmd``/``tool.bat`` shims that
+    CreateProcess cannot run without cmd.exe. On Windows, prepend ``cmd /C``
+    when argv[0] is such a shim; otherwise return argv unchanged.
+    """
+    if sys.platform != "win32" or not argv:
+        return list(argv)
+    exe = argv[0]
+    if isinstance(exe, str) and exe.lower().endswith((".cmd", ".bat")):
+        return ["cmd", "/C"] + list(argv)
+    return list(argv)
 
 
 def read_prompt_text(prompt_file: Path) -> str:
